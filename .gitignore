@@ -3,4 +3,6 @@ __pycache__/
 *$py.class
 .pytest_cache/
 /tmp/winscp-linux-cache/
+venv/
+.venv/
 .DS_Store
