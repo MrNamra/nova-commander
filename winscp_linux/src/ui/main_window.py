@@ -85,7 +85,7 @@ from ..core.terminal_launcher import launch_system_terminal
 from .export_dialog import ExportDialog
 from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog, SimpleOpenPromptDialog
 from .session_dialog import SessionDialog
-from .terminal_widget import SSHTerminalWindow, TerminalWidget
+from .terminal_widget import SSHTerminalWindow
 
 
 class ChmodDialog(QDialog):
@@ -434,18 +434,9 @@ class SessionCommanderView(QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
-        # Vertical splitter dividing Dual-Pane Commander and Embedded Terminal
-        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
-        layout.addWidget(self.v_splitter)
-
-        # Dual-Pane container
-        pane_container = QWidget()
-        pane_layout = QHBoxLayout(pane_container)
-        pane_layout.setContentsMargins(0, 0, 0, 0)
-        pane_layout.setSpacing(4)
-
+        # Dual-Pane layout
         self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
-        pane_layout.addWidget(self.h_splitter)
+        layout.addWidget(self.h_splitter)
 
         # === Left Panel: Local Filesystem ===
         left_widget = QWidget()
@@ -498,16 +489,7 @@ class SessionCommanderView(QWidget):
         self.h_splitter.setStretchFactor(0, 1)
         self.h_splitter.setStretchFactor(1, 1)
 
-        self.v_splitter.addWidget(pane_container)
-
-        # === Embedded Terminal Panel ===
-        self.terminal_widget = TerminalWidget(self.ssh_shell, self)
-        self.terminal_widget.close_requested.connect(self._toggle_terminal)
-        self.v_splitter.addWidget(self.terminal_widget)
-        self.terminal_widget.hide()
-
-        self.v_splitter.setStretchFactor(0, 3)
-        self.v_splitter.setStretchFactor(1, 1)
+        self.terminal_widget = None
 
         # Connections
         self.btn_local_go.clicked.connect(self._on_local_go)
@@ -561,7 +543,6 @@ class SessionCommanderView(QWidget):
 
             self.txt_remote_path.setText(remote_home)
             self._load_remote_directory(remote_home)
-            self._init_terminal_channel()
 
             title = session.name if session.name else session.host
             info = f"{session.username}@{session.host}:{session.port}"
@@ -589,13 +570,12 @@ class SessionCommanderView(QWidget):
         worker.start()
 
     def disconnect_session(self):
-        """Disconnects SFTP and SSH and cleans up cache for this session."""
+        """Disconnects SFTP and cleans up cache for this session."""
         self.sftp_client.disconnect()
         self.ssh_shell.close()
         self.sync_engine.cleanup_session(self.session_id)
 
         self.table_remote.setRowCount(0)
-        self.terminal_widget.hide()
         self.session_disconnected.emit()
         self.status_message.emit("Disconnected.")
 
@@ -605,43 +585,9 @@ class SessionCommanderView(QWidget):
         self.ssh_shell.close()
         self.sync_engine.cleanup_session(self.session_id)
 
-    # ----------------- Terminal -----------------
-    def _init_terminal_channel(self):
-        if not self.sftp_client.is_connected or not self.sftp_client.ssh_client:
-            return
-
-        cols = self.terminal_widget.canvas.cols
-        rows = self.terminal_widget.canvas.rows
-        try:
-            self.ssh_shell.open_shell(
-                ssh_client=self.sftp_client.ssh_client,
-                cols=cols,
-                rows=rows,
-            )
-            if self.current_session:
-                self.terminal_widget.set_session_info(
-                    self.current_session.username, self.current_session.host
-                )
-        except Exception as exc:
-            self.status_message.emit(f"Terminal error: {exc}")
-
     def open_terminal(self):
-        if not self.sftp_client.is_connected:
-            QMessageBox.information(self, "No Active Session", "Please connect to a remote session first.")
-            return
-
-        if not self.ssh_shell.is_active:
-            self._init_terminal_channel()
-
-        self.terminal_widget.show()
-        self.terminal_widget.canvas.setFocus()
-        self.status_message.emit("SSH Terminal active.")
-
-    def _toggle_terminal(self):
-        if self.terminal_widget.isVisible():
-            self.terminal_widget.hide()
-        else:
-            self.open_terminal()
+        """Opens the native system terminal connected via SSH (Ctrl+P)."""
+        self.open_terminal_window()
 
     def open_terminal_window(self):
         """Opens a dedicated SSH interactive terminal in a new standalone window (Ctrl+P)."""
@@ -1678,11 +1624,6 @@ class MainWindow(QMainWindow):
         act_pref_editor.triggered.connect(self.configure_default_applications)
 
         m_cmd.addSeparator()
-        act_term = m_cmd.addAction("Open Terminal (Ctrl+T)")
-        act_term.setShortcut(QKeySequence("Ctrl+T"))
-        act_term.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
-        act_term.triggered.connect(self.open_terminal)
-
         act_term_win = m_cmd.addAction("Open in System Terminal (Ctrl+P)")
         act_term_win.setShortcut(QKeySequence("Ctrl+P"))
         act_term_win.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -1693,9 +1634,6 @@ class MainWindow(QMainWindow):
         act_refresh = m_view.addAction("Refresh (Ctrl+R)")
         act_refresh.setShortcut("Ctrl+R")
         act_refresh.triggered.connect(self.refresh_both)
-
-        act_toggle_term = m_view.addAction("Toggle Terminal")
-        act_toggle_term.triggered.connect(self._toggle_terminal)
 
         # Help Menu
         m_help = menubar.addMenu("&Help")
@@ -1746,9 +1684,6 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.tb_term = toolbar.addAction("💻 Terminal (Ctrl+T)")
-        self.tb_term.triggered.connect(self.open_terminal)
-
         self.tb_term_win = toolbar.addAction("🖥 System Terminal (Ctrl+P)")
         self.tb_term_win.setToolTip("Open native OS terminal connected via SSH (Ctrl+P)")
         self.tb_term_win.triggered.connect(self.open_terminal_window)
@@ -1785,10 +1720,6 @@ class MainWindow(QMainWindow):
         self.sc_rename = QShortcut(QKeySequence("F2"), self)
         self.sc_rename.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.sc_rename.activated.connect(self.rename_selected)
-
-        self.sc_term_dock = QShortcut(QKeySequence("Ctrl+T"), self)
-        self.sc_term_dock.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.sc_term_dock.activated.connect(self.open_terminal)
 
     # =========================================================================
     # Multi-Session Tab Management
@@ -1984,11 +1915,7 @@ class MainWindow(QMainWindow):
 
     def open_terminal(self):
         if view := self.active_session_view():
-            view.open_terminal()
-
-    def _toggle_terminal(self):
-        if view := self.active_session_view():
-            view._toggle_terminal()
+            view.open_terminal_window()
 
     def open_terminal_window(self):
         if view := self.active_session_view():
@@ -2041,7 +1968,7 @@ class MainWindow(QMainWindow):
             "<li>Multi-Session Tabbed SSH / SFTP Commander</li>"
             "<li>Bidirectional Drag & Drop Transfers for Files and Folders</li>"
             "<li>Live Remote Direct-Edit with Watchdog (inotify) Auto-Sync</li>"
-            "<li>Embedded Interactive SSH Shell Terminal per Connection</li>"
+            "<li>Native OS Terminal Integration (Ctrl+P)</li>"
             "<li>WinSCP-Compatible .ini Export & Import</li>"
             "<li>AES-256-GCM + PBKDF2HMAC (600,000 rounds) Encrypted Backups</li>"
             "</ul>"

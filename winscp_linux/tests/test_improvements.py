@@ -281,6 +281,17 @@ def test_ctrl_p_terminal_shortcut_wiring(qapp):
 
     assert found_ctrl_p, "Ctrl+P shortcut action was not found in menus!"
 
+    # Verify Ctrl+T built-in dock shortcut is removed
+    found_ctrl_t = False
+    for action in win.menuBar().actions():
+        menu = action.menu()
+        if menu:
+            for sub_act in menu.actions():
+                if sub_act.shortcut().toString() == "Ctrl+T":
+                    found_ctrl_t = True
+    assert not found_ctrl_t, "Ctrl+T should be removed from menus!"
+    assert not hasattr(win, "sc_term_dock"), "sc_term_dock (Ctrl+T) should be removed!"
+
     # Verify open_terminal_window method exists and can be called safely
     assert hasattr(win, "open_terminal_window")
     view = win.active_session_view()
