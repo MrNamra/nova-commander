@@ -1,7 +1,27 @@
 #!/usr/bin/env python3
 """Convenience runner for WinSCP-Linux from repository root."""
+import os
 import sys
 from pathlib import Path
+
+# Ensure Qt 6.5+ xcb-cursor0 dependency is loaded seamlessly
+if os.environ.get("_WINSCP_XCB_LOADED") != "1":
+    candidates = [
+        Path(__file__).resolve().parent / "winscp_linux" / "lib",
+        Path.home() / ".local" / "lib",
+    ]
+    for c in candidates:
+        if (c / "libxcb-cursor.so.0").exists():
+            lib_path = str(c)
+            current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+            if lib_path not in current_ld.split(":"):
+                os.environ["_WINSCP_XCB_LOADED"] = "1"
+                os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{current_ld}" if current_ld else lib_path
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception:
+                    pass
+            break
 
 # Add winscp_linux and winscp_linux/src to sys.path
 root_dir = Path(__file__).resolve().parent

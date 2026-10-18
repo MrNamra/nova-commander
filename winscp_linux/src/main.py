@@ -12,13 +12,24 @@ import signal
 import sys
 from pathlib import Path
 
-# Ensure 'src' package can be imported from root or src/
-current_dir = Path(__file__).resolve().parent
-parent_dir = current_dir.parent
-if str(current_dir) not in sys.path:
-    sys.path.insert(0, str(current_dir))
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
+# Ensure Qt 6.5+ xcb-cursor0 dependency is loaded seamlessly
+if os.environ.get("_WINSCP_XCB_LOADED") != "1":
+    candidates = [
+        Path(__file__).resolve().parent.parent / "lib",
+        Path.home() / ".local" / "lib",
+    ]
+    for c in candidates:
+        if (c / "libxcb-cursor.so.0").exists():
+            lib_path = str(c)
+            current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+            if lib_path not in current_ld.split(":"):
+                os.environ["_WINSCP_XCB_LOADED"] = "1"
+                os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{current_ld}" if current_ld else lib_path
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception:
+                    pass
+            break
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon, QPalette, QColor
