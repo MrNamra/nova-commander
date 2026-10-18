@@ -10,6 +10,7 @@ Implements:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -17,10 +18,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon
+from PyQt6.QtCore import QMimeData, QPoint, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QDrag,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QFont,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -50,6 +64,7 @@ from ..core.session_store import SessionConfig, SessionStore
 from ..core.sftp_client import (
     RemoteFileInfo,
     SFTPActionWorker,
+    SFTPBatchTransferWorker,
     SFTPClient,
     SFTPConnectWorker,
     SFTPDownloadWorker,
@@ -179,6 +194,182 @@ class ChmodDialog(QDialog):
             return 0o755
 
 
+class CommanderTableWidget(QTableWidget):
+    """
+    Commander Table supporting seamless bidirectional Drag and Drop
+    for both files and folders across Local and Remote panes, as well as
+    accepting files dragged from external desktop file managers.
+    """
+
+    items_dropped = pyqtSignal(dict)
+
+    def __init__(self, pane_type: str, parent: Optional[QWidget] = None):
+        super().__init__(0, 4, parent)
+        self.pane_type = pane_type  # "local" or "remote"
+        self._current_directory: str = "/"
+        self._drag_start_pos: Optional[QPoint] = None
+
+        self.setHorizontalHeaderLabels(["Name", "Size", "Permissions", "Modified"])
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        # Enable Drag and Drop
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+
+    def set_current_directory(self, path: str):
+        self._current_directory = path
+
+    def get_current_directory(self) -> str:
+        return self._current_directory
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if not (event.buttons() & Qt.MouseButton.LeftButton) or not self._drag_start_pos:
+            super().mouseMoveEvent(event)
+            return
+
+        if (event.pos() - self._drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+
+        self._start_drag()
+
+    def _start_drag(self):
+        selected_rows = sorted(set(idx.row() for idx in self.selectedIndexes()))
+        if not selected_rows:
+            return
+
+        drag_items = []
+        for r in selected_rows:
+            item = self.item(r, 0)
+            if not item:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+            drag_items.append({
+                "name": data["name"],
+                "path": data["path"],
+                "is_dir": data.get("is_dir", False),
+            })
+
+        if not drag_items:
+            return
+
+        drag = QDrag(self)
+        mime = QMimeData()
+
+        # Set specific MIME identifier for WinSCP pane
+        mime_format = f"application/x-winscp-{self.pane_type}-items"
+        mime.setData(mime_format, json.dumps(drag_items).encode("utf-8"))
+
+        if self.pane_type == "local":
+            urls = [QUrl.fromLocalFile(it["path"]) for it in drag_items]
+            mime.setUrls(urls)
+        else:
+            mime.setText("\n".join(it["path"] for it in drag_items))
+
+        drag.setMimeData(mime)
+
+        # Drag visual badge preview
+        first_item = drag_items[0]
+        prefix = "📁" if first_item["is_dir"] else "📄"
+        count_suffix = f" (+{len(drag_items)-1})" if len(drag_items) > 1 else ""
+        label_text = f" {prefix} {first_item['name']}{count_suffix} "
+
+        pixmap = QPixmap(max(160, len(label_text) * 9), 28)
+        pixmap.fill(QColor(38, 79, 120, 230))
+        painter = QPainter(pixmap)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(6, 18, label_text)
+        painter.end()
+
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(12, 14))
+
+        drag.exec(Qt.DropAction.CopyAction)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        mime = event.mimeData()
+        if (
+            mime.hasFormat("application/x-winscp-local-items")
+            or mime.hasFormat("application/x-winscp-remote-items")
+            or mime.hasUrls()
+        ):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        mime = event.mimeData()
+        if (
+            mime.hasFormat("application/x-winscp-local-items")
+            or mime.hasFormat("application/x-winscp-remote-items")
+            or mime.hasUrls()
+        ):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent):
+        mime = event.mimeData()
+
+        target_folder = self._current_directory
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        row = self.rowAt(pos.y())
+        if row >= 0:
+            item = self.item(row, 0)
+            if item:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if data and data.get("is_dir") and data.get("name") != "..":
+                    target_folder = data["path"]
+
+        source_pane = "external"
+        items = []
+
+        if mime.hasFormat("application/x-winscp-local-items"):
+            source_pane = "local"
+            raw = bytes(mime.data("application/x-winscp-local-items")).decode("utf-8")
+            items = json.loads(raw)
+        elif mime.hasFormat("application/x-winscp-remote-items"):
+            source_pane = "remote"
+            raw = bytes(mime.data("application/x-winscp-remote-items")).decode("utf-8")
+            items = json.loads(raw)
+        elif mime.hasUrls():
+            source_pane = "external"
+            for u in mime.urls():
+                p = u.toLocalFile()
+                if p:
+                    items.append({
+                        "name": Path(p).name,
+                        "path": p,
+                        "is_dir": os.path.isdir(p),
+                    })
+
+        if items:
+            event.acceptProposedAction()
+            self.items_dropped.emit({
+                "source_pane": source_pane,
+                "target_pane": self.pane_type,
+                "target_folder": target_folder,
+                "items": items,
+            })
+        else:
+            event.ignore()
+
+
 class MainWindow(QMainWindow):
     """
     WinSCP-Linux Commander Main Window.
@@ -250,12 +441,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(local_header)
 
         # Local Table
-        self.table_local = QTableWidget(0, 4)
-        self.table_local.setHorizontalHeaderLabels(["Name", "Size", "Permissions", "Modified"])
-        self.table_local.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table_local.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table_local.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_local.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_local = CommanderTableWidget("local", self)
         left_layout.addWidget(self.table_local)
 
         self.h_splitter.addWidget(left_widget)
@@ -282,12 +468,7 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(remote_header)
 
         # Remote Table
-        self.table_remote = QTableWidget(0, 4)
-        self.table_remote.setHorizontalHeaderLabels(["Name", "Size", "Permissions", "Modified"])
-        self.table_remote.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table_remote.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table_remote.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_remote.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_remote = CommanderTableWidget("remote", self)
         right_layout.addWidget(self.table_remote)
 
         self.h_splitter.addWidget(right_widget)
@@ -312,12 +493,14 @@ class MainWindow(QMainWindow):
         self.btn_local_up.clicked.connect(self._on_local_up)
         self.table_local.cellDoubleClicked.connect(self._on_local_double_clicked)
         self.table_local.customContextMenuRequested.connect(self._show_local_context_menu)
+        self.table_local.items_dropped.connect(self._handle_items_dropped)
 
         self.btn_remote_go.clicked.connect(self._on_remote_go)
         self.txt_remote_path.returnPressed.connect(self._on_remote_go)
         self.btn_remote_up.clicked.connect(self._on_remote_up)
         self.table_remote.cellDoubleClicked.connect(self._on_remote_double_clicked)
         self.table_remote.customContextMenuRequested.connect(self._show_remote_context_menu)
+        self.table_remote.items_dropped.connect(self._handle_items_dropped)
 
     def _setup_menus(self):
         menubar = self.menuBar()
@@ -574,6 +757,7 @@ class MainWindow(QMainWindow):
             return
 
         self.txt_local_path.setText(str(target))
+        self.table_local.set_current_directory(str(target))
         self.table_local.setRowCount(0)
 
         # Parent directory ..
@@ -650,6 +834,7 @@ class MainWindow(QMainWindow):
         def _on_success(items: List[RemoteFileInfo], current_dir: str):
             self.progress_bar.hide()
             self.txt_remote_path.setText(current_dir)
+            self.table_remote.set_current_directory(current_dir)
             self.table_remote.setRowCount(0)
 
             for item in items:
@@ -762,117 +947,277 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"❌ Auto-sync failed for {remote_path}: {error_msg}", 8000)
 
     # =========================================================================
-    # Transfers: Upload & Download
+    # =========================================================================
+    # Transfers: Upload & Download (Supports both Files & Folders)
     # =========================================================================
 
+    def _execute_batch_transfer(self, transfers: List[dict], refresh_pane: str):
+        """Executes a batch of file/folder upload or download transfers."""
+        if not transfers:
+            return
+
+        total_items = len(transfers)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.show()
+
+        worker = SFTPBatchTransferWorker(self.sftp_client, transfers)
+        self._active_worker = worker
+
+        def _on_started(name: str, idx: int, total: int):
+            self.lbl_status.setText(f"Transferring ({idx}/{total}): {name}...")
+            self.progress_bar.setValue(int(((idx - 1) / total) * 100))
+
+        def _on_prog(transferred: int, total: int):
+            if total > 0:
+                pass
+
+        def _on_finish(count: int):
+            self.progress_bar.hide()
+            self.status_bar.showMessage(f"✔ Completed transfer of {count} item(s) successfully.", 5000)
+            if refresh_pane == "remote":
+                self._load_remote_directory(self.txt_remote_path.text())
+            else:
+                self._load_local_directory(self.txt_local_path.text())
+
+        def _on_fail(err: str):
+            self.progress_bar.hide()
+            self.lbl_status.setText("Transfer failed.")
+            QMessageBox.critical(self, "Transfer Error", f"Transfer failed:\n{err}")
+
+        worker.item_started.connect(_on_started)
+        worker.progress.connect(_on_prog)
+        worker.finished.connect(_on_finish)
+        worker.failed.connect(_on_fail)
+        worker.start()
+
+    def _handle_items_dropped(self, drop_data: dict):
+        """
+        Handles Drag & Drop events between local, remote, and external file sources.
+        Supports both files and entire folders.
+        """
+        source_pane = drop_data["source_pane"]
+        target_pane = drop_data["target_pane"]
+        target_folder = drop_data["target_folder"]
+        items = drop_data["items"]
+
+        if not items:
+            return
+
+        # ---------------------------------------------------------------------
+        # Case A: Dropped onto Remote Pane (Upload)
+        # ---------------------------------------------------------------------
+        if target_pane == "remote":
+            if not self.sftp_client.is_connected:
+                QMessageBox.warning(self, "Not Connected", "Please connect to a remote server before uploading.")
+                return
+
+            if source_pane == "remote":
+                # Remote-to-Remote move into a subfolder
+                if target_folder == self.txt_remote_path.text().rstrip("/"):
+                    return
+                reply = QMessageBox.question(
+                    self,
+                    "Move Remote Items",
+                    f"Move {len(items)} remote item(s) to:\n{target_folder}?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    for it in items:
+                        src_p = it["path"]
+                        dst_p = f"{target_folder.rstrip('/')}/{Path(src_p).name}"
+                        try:
+                            self.sftp_client.rename(src_p, dst_p)
+                        except Exception as e:
+                            QMessageBox.critical(self, "Move Error", f"Failed to move {it['name']}: {e}")
+                    self._load_remote_directory(self.txt_remote_path.text())
+                return
+
+            # From Local or External -> Upload to Remote
+            transfers = []
+            for it in items:
+                src_p = it["path"]
+                name = Path(src_p).name
+                dst_p = f"{target_folder.rstrip('/')}/{name}"
+                is_dir = it.get("is_dir", False) or os.path.isdir(src_p)
+                transfers.append({
+                    "source": src_p,
+                    "dest": dst_p,
+                    "is_dir": is_dir,
+                    "direction": "upload",
+                })
+
+            prompt_msg = (
+                f"Upload '{Path(transfers[0]['source']).name}' to:\n{target_folder}?"
+                if len(transfers) == 1
+                else f"Upload {len(transfers)} item(s) (files & folders) to:\n{target_folder}?"
+            )
+            reply = QMessageBox.question(
+                self,
+                "Confirm Drag & Drop Upload",
+                prompt_msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            self._execute_batch_transfer(transfers, refresh_pane="remote")
+
+        # ---------------------------------------------------------------------
+        # Case B: Dropped onto Local Pane (Download or Local Copy)
+        # ---------------------------------------------------------------------
+        elif target_pane == "local":
+            if source_pane == "remote":
+                # From Remote -> Download to Local
+                if not self.sftp_client.is_connected:
+                    return
+
+                transfers = []
+                for it in items:
+                    src_p = it["path"]
+                    name = Path(src_p).name
+                    dst_p = str(Path(target_folder) / name)
+                    is_dir = it.get("is_dir", False)
+                    transfers.append({
+                        "source": src_p,
+                        "dest": dst_p,
+                        "is_dir": is_dir,
+                        "direction": "download",
+                    })
+
+                prompt_msg = (
+                    f"Download '{Path(transfers[0]['source']).name}' to:\n{target_folder}?"
+                    if len(transfers) == 1
+                    else f"Download {len(transfers)} item(s) (files & folders) to:\n{target_folder}?"
+                )
+                reply = QMessageBox.question(
+                    self,
+                    "Confirm Drag & Drop Download",
+                    prompt_msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+                self._execute_batch_transfer(transfers, refresh_pane="local")
+
+            else:
+                # Local or External dropped onto Local folder
+                target_path = Path(target_folder)
+                for it in items:
+                    src_p = Path(it["path"])
+                    if src_p.parent == target_path:
+                        continue
+                    dest_p = target_path / src_p.name
+                    try:
+                        if src_p.is_dir():
+                            shutil.copytree(src_p, dest_p, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(src_p, dest_p)
+                    except Exception as exc:
+                        QMessageBox.critical(self, "Copy Error", f"Could not copy {src_p.name}: {exc}")
+                self._load_local_directory(self.txt_local_path.text())
+
     def upload_selected(self):
-        """Uploads selected local file(s) to current remote directory."""
+        """Uploads selected local file(s) and folder(s) to current remote directory."""
         if not self.sftp_client.is_connected:
             QMessageBox.warning(self, "Not Connected", "Connect to a remote server before uploading.")
             return
 
-        selected = self.table_local.selectedItems()
-        if not selected:
-            QMessageBox.information(self, "Select File", "Please select a local file or folder to upload.")
+        selected_rows = sorted(set(idx.row() for idx in self.table_local.selectedIndexes()))
+        if not selected_rows:
+            QMessageBox.information(self, "Select Item", "Please select a local file or folder to upload.")
             return
 
-        row = selected[0].row()
-        data = self.table_local.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        if not data:
+        transfers = []
+        remote_base = self.txt_remote_path.text().rstrip("/")
+        for r in selected_rows:
+            item = self.table_local.item(r, 0)
+            if not item:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+
+            local_path = data["path"]
+            local_name = Path(local_path).name
+            remote_dest = f"{remote_base}/{local_name}"
+            is_dir = data.get("is_dir", False) or os.path.isdir(local_path)
+            transfers.append({
+                "source": local_path,
+                "dest": remote_dest,
+                "is_dir": is_dir,
+                "direction": "upload",
+            })
+
+        if not transfers:
             return
 
-        local_path = data["path"]
-        local_name = Path(local_path).name
-        remote_dest = f"{self.txt_remote_path.text().rstrip('/')}/{local_name}"
-
+        prompt_msg = (
+            f"Upload '{Path(transfers[0]['source']).name}' to:\n{remote_base}?"
+            if len(transfers) == 1
+            else f"Upload {len(transfers)} item(s) (files & folders) to:\n{remote_base}?"
+        )
         reply = QMessageBox.question(
             self,
             "Confirm Upload",
-            f"Upload '{local_name}' to:\n{remote_dest}?",
+            prompt_msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.lbl_status.setText(f"Uploading {local_name}...")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.show()
-
-        worker = SFTPUploadWorker(self.sftp_client, local_path, remote_dest)
-        self._active_worker = worker
-
-        def _on_prog(transferred: int, total: int):
-            if total > 0:
-                self.progress_bar.setValue(int((transferred / total) * 100))
-
-        def _on_finish(lp: str, rp: str):
-            self.progress_bar.hide()
-            self.status_bar.showMessage(f"Uploaded {local_name} successfully.", 4000)
-            self._load_remote_directory(self.txt_remote_path.text())
-
-        def _on_fail(err: str):
-            self.progress_bar.hide()
-            QMessageBox.critical(self, "Upload Error", f"Upload failed:\n{err}")
-
-        worker.progress.connect(_on_prog)
-        worker.finished.connect(_on_finish)
-        worker.failed.connect(_on_fail)
-        worker.start()
+        self._execute_batch_transfer(transfers, refresh_pane="remote")
 
     def download_selected(self):
-        """Downloads selected remote file(s) to current local directory."""
+        """Downloads selected remote file(s) and folder(s) to current local directory."""
         if not self.sftp_client.is_connected:
             return
 
-        selected = self.table_remote.selectedItems()
-        if not selected:
-            QMessageBox.information(self, "Select File", "Please select a remote file to download.")
+        selected_rows = sorted(set(idx.row() for idx in self.table_remote.selectedIndexes()))
+        if not selected_rows:
+            QMessageBox.information(self, "Select Item", "Please select a remote file or folder to download.")
             return
 
-        row = selected[0].row()
-        data = self.table_remote.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        if not data or data.get("is_dir"):
+        transfers = []
+        local_base = Path(self.txt_local_path.text())
+        for r in selected_rows:
+            item = self.table_remote.item(r, 0)
+            if not item:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+
+            remote_path = data["path"]
+            remote_name = Path(remote_path).name
+            local_dest = str(local_base / remote_name)
+            is_dir = data.get("is_dir", False)
+            transfers.append({
+                "source": remote_path,
+                "dest": local_dest,
+                "is_dir": is_dir,
+                "direction": "download",
+            })
+
+        if not transfers:
             return
 
-        remote_path = data["path"]
-        remote_name = Path(remote_path).name
-        local_dest = str(Path(self.txt_local_path.text()) / remote_name)
-
+        prompt_msg = (
+            f"Download '{Path(transfers[0]['source']).name}' to:\n{local_base}?"
+            if len(transfers) == 1
+            else f"Download {len(transfers)} item(s) (files & folders) to:\n{local_base}?"
+        )
         reply = QMessageBox.question(
             self,
             "Confirm Download",
-            f"Download '{remote_name}' to:\n{local_dest}?",
+            prompt_msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        self.lbl_status.setText(f"Downloading {remote_name}...")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.show()
-
-        worker = SFTPDownloadWorker(self.sftp_client, remote_path, local_dest)
-        self._active_worker = worker
-
-        def _on_prog(transferred: int, total: int):
-            if total > 0:
-                self.progress_bar.setValue(int((transferred / total) * 100))
-
-        def _on_finish(rp: str, lp: str):
-            self.progress_bar.hide()
-            self.status_bar.showMessage(f"Downloaded {remote_name} successfully.", 4000)
-            self._load_local_directory(self.txt_local_path.text())
-
-        def _on_fail(err: str):
-            self.progress_bar.hide()
-            QMessageBox.critical(self, "Download Error", f"Download failed:\n{err}")
-
-        worker.progress.connect(_on_prog)
-        worker.finished.connect(_on_finish)
-        worker.failed.connect(_on_fail)
-        worker.start()
+        self._execute_batch_transfer(transfers, refresh_pane="local")
 
     # =========================================================================
     # File Operations: Chmod, Rename, Delete, Mkdir

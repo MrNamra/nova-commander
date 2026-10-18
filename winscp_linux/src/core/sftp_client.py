@@ -268,6 +268,29 @@ class SFTPClient:
         os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
         self._sftp.get(remote_path, local_path, callback=callback)
 
+    def download_directory(
+        self,
+        remote_dir: str,
+        local_dir: str,
+        callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Recursively downloads a remote directory to local filesystem."""
+        if not self.is_connected or not self._sftp:
+            raise RuntimeError("SFTP client is not connected.")
+
+        os.makedirs(local_dir, exist_ok=True)
+
+        for item in self._sftp.listdir_attr(remote_dir):
+            if item.filename in (".", ".."):
+                continue
+            sub_remote = f"{remote_dir.rstrip('/')}/{item.filename}"
+            sub_local = os.path.join(local_dir, item.filename)
+
+            if stat.S_ISDIR(item.st_mode):
+                self.download_directory(sub_remote, sub_local, callback=callback)
+            else:
+                self.download_file(sub_remote, sub_local, callback=callback)
+
     def upload_file(
         self,
         local_path: str,
@@ -282,6 +305,50 @@ class SFTPClient:
             raise FileNotFoundError(f"Local file '{local_path}' does not exist.")
 
         self._sftp.put(local_path, remote_path, callback=callback)
+
+    def upload_directory(
+        self,
+        local_dir: str,
+        remote_dir: str,
+        callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Recursively uploads a local directory to remote SFTP."""
+        if not self.is_connected or not self._sftp:
+            raise RuntimeError("SFTP client is not connected.")
+
+        local_path = Path(local_dir).resolve()
+        if not local_path.is_dir():
+            raise NotADirectoryError(f"'{local_dir}' is not a directory.")
+
+        try:
+            self._sftp.stat(remote_dir)
+        except IOError:
+            try:
+                self.mkdir(remote_dir)
+            except Exception:
+                pass
+
+        for root, dirs, files in os.walk(str(local_path)):
+            rel_path = os.path.relpath(root, str(local_path))
+            if rel_path == ".":
+                curr_remote_dir = remote_dir
+            else:
+                curr_remote_dir = f"{remote_dir.rstrip('/')}/{rel_path.replace(os.sep, '/')}"
+
+            for d in dirs:
+                target_sub = f"{curr_remote_dir.rstrip('/')}/{d}"
+                try:
+                    self._sftp.stat(target_sub)
+                except IOError:
+                    try:
+                        self.mkdir(target_sub)
+                    except Exception:
+                        pass
+
+            for f in files:
+                source_file = os.path.join(root, f)
+                dest_file = f"{curr_remote_dir.rstrip('/')}/{f}"
+                self.upload_file(source_file, dest_file, callback=callback)
 
     def delete_file(self, remote_path: str) -> None:
         """Deletes a file on remote server."""
@@ -398,49 +465,111 @@ class SFTPListDirWorker(QThread):
 
 
 class SFTPDownloadWorker(QThread):
-    """Background worker for file download with progress tracking."""
+    """Background worker for file or directory download with progress tracking."""
 
     progress = pyqtSignal(int, int)  # transferred, total
     finished = pyqtSignal(str, str)  # remote_path, local_path
     failed = pyqtSignal(str)
 
-    def __init__(self, sftp_client: SFTPClient, remote_path: str, local_path: str):
+    def __init__(self, sftp_client: SFTPClient, remote_path: str, local_path: str, is_dir: bool = False):
         super().__init__()
         self.sftp_client = sftp_client
         self.remote_path = remote_path
         self.local_path = local_path
+        self.is_dir = is_dir
 
     def run(self):
         try:
             def _cb(transferred: int, total: int):
                 self.progress.emit(transferred, total)
 
-            self.sftp_client.download_file(self.remote_path, self.local_path, callback=_cb)
+            if self.is_dir:
+                self.sftp_client.download_directory(self.remote_path, self.local_path, callback=_cb)
+            else:
+                self.sftp_client.download_file(self.remote_path, self.local_path, callback=_cb)
             self.finished.emit(self.remote_path, self.local_path)
         except Exception as exc:
             self.failed.emit(str(exc))
 
 
 class SFTPUploadWorker(QThread):
-    """Background worker for file upload with progress tracking."""
+    """Background worker for file or directory upload with progress tracking."""
 
     progress = pyqtSignal(int, int)  # transferred, total
     finished = pyqtSignal(str, str)  # local_path, remote_path
     failed = pyqtSignal(str)
 
-    def __init__(self, sftp_client: SFTPClient, local_path: str, remote_path: str):
+    def __init__(self, sftp_client: SFTPClient, local_path: str, remote_path: str, is_dir: bool = False):
         super().__init__()
         self.sftp_client = sftp_client
         self.local_path = local_path
         self.remote_path = remote_path
+        self.is_dir = is_dir or os.path.isdir(local_path)
 
     def run(self):
         try:
             def _cb(transferred: int, total: int):
                 self.progress.emit(transferred, total)
 
-            self.sftp_client.upload_file(self.local_path, self.remote_path, callback=_cb)
+            if self.is_dir:
+                self.sftp_client.upload_directory(self.local_path, self.remote_path, callback=_cb)
+            else:
+                self.sftp_client.upload_file(self.local_path, self.remote_path, callback=_cb)
             self.finished.emit(self.local_path, self.remote_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class SFTPBatchTransferWorker(QThread):
+    """
+    Background worker for transferring multiple files and folders in batch.
+    Supports both upload and download operations with per-item progress.
+    """
+
+    item_started = pyqtSignal(str, int, int)  # item_name, current_index (1-based), total_items
+    progress = pyqtSignal(int, int)          # transferred, total
+    finished = pyqtSignal(int)               # total_transferred
+    failed = pyqtSignal(str)
+
+    def __init__(self, sftp_client: SFTPClient, transfers: List[dict]):
+        """
+        transfers: List of dicts, each containing:
+            - source: str (path)
+            - dest: str (path)
+            - is_dir: bool
+            - direction: "upload" or "download"
+        """
+        super().__init__()
+        self.sftp_client = sftp_client
+        self.transfers = transfers
+
+    def run(self):
+        total = len(self.transfers)
+        try:
+            for idx, item in enumerate(self.transfers, start=1):
+                source = item["source"]
+                dest = item["dest"]
+                is_dir = item.get("is_dir", False)
+                direction = item.get("direction", "upload")
+                name = Path(source).name or source
+
+                self.item_started.emit(name, idx, total)
+
+                def _cb(transferred: int, tot: int):
+                    self.progress.emit(transferred, tot)
+
+                if direction == "upload":
+                    if is_dir or os.path.isdir(source):
+                        self.sftp_client.upload_directory(source, dest, callback=_cb)
+                    else:
+                        self.sftp_client.upload_file(source, dest, callback=_cb)
+                else:  # download
+                    if is_dir:
+                        self.sftp_client.download_directory(source, dest, callback=_cb)
+                    else:
+                        self.sftp_client.download_file(source, dest, callback=_cb)
+
+            self.finished.emit(total)
         except Exception as exc:
             self.failed.emit(str(exc))
 
