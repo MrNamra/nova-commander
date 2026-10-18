@@ -26,17 +26,29 @@ if os.environ.get("_WINSCP_XCB_LOADED") != "1":
                 os.environ["_WINSCP_XCB_LOADED"] = "1"
                 os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{current_ld}" if current_ld else lib_path
                 try:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    argv = getattr(sys, "orig_argv", [sys.executable] + sys.argv)
+                    os.execv(sys.executable, argv)
                 except Exception:
                     pass
             break
 
+# Ensure root and src directory are in sys.path
+_src_dir = Path(__file__).resolve().parent
+_root_dir = _src_dir.parent
+for _p in [str(_root_dir), str(_src_dir)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon, QPalette, QColor
+from PyQt6.QtGui import QColor, QIcon, QPalette
 from PyQt6.QtWidgets import QApplication
 
-from src.core.session_store import SessionStore
-from src.ui.main_window import MainWindow
+try:
+    from src.core.session_store import SessionStore
+    from src.ui.main_window import MainWindow
+except ImportError:
+    from core.session_store import SessionStore
+    from ui.main_window import MainWindow
 
 
 def apply_theme(app: QApplication):
@@ -165,6 +177,21 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("WinSCP-Linux")
     app.setOrganizationName("WinSCP-Linux")
+
+    # Set default application and window icon
+    icon_candidates = [
+        _src_dir / "resources" / "winscp-linux.png",
+        _src_dir / "resources" / "winscp-linux.svg",
+        Path("/usr/share/icons/hicolor/scalable/apps/winscp-linux.svg"),
+        Path("/usr/share/icons/hicolor/256x256/apps/winscp-linux.png"),
+        Path("/usr/share/pixmaps/winscp-linux.png"),
+    ]
+    for icp in icon_candidates:
+        if icp.exists():
+            app_icon = QIcon(str(icp))
+            app.setWindowIcon(app_icon)
+            break
+
     apply_theme(app)
 
     session_store = SessionStore()

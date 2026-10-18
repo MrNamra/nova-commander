@@ -141,7 +141,7 @@ pip install -r requirements.txt
 ```
 *(Or use `pip install -r winscp_linux/requirements.txt` from repository root)*
 
-### 3. Launch WinSCP-Linux
+### 3. Launch WinSCP-Linux (Portable / Direct)
 Run either from root or from the package:
 ```bash
 # From repository root:
@@ -150,6 +150,37 @@ python3 main.py
 # Or directly:
 python3 winscp_linux/src/main.py
 ```
+
+---
+
+## 📦 Native Debian Package (.deb) Installation
+
+You can install WinSCP-Linux as a native desktop application on Debian, Ubuntu, Linux Mint, Pop!_OS, and Kali:
+
+```bash
+# Install the .deb package:
+sudo dpkg -i winscp-linux_1.0.0_amd64.deb
+
+# Resolve any system dependencies automatically:
+sudo apt-get install -f
+```
+
+### Desktop Integration
+Upon installation, WinSCP-Linux automatically provides:
+- **System Binary:** `/usr/bin/winscp-linux` (callable anywhere in terminal).
+- **Application Menu Launcher:** `/usr/share/applications/winscp-linux.desktop`.
+- **System Icons:** High-resolution icons in `/usr/share/icons/hicolor/` (16x16 up to 512x512 and scalable SVG) and `/usr/share/pixmaps/`.
+- **MIME Handler:** Registers `sftp://` and `ssh://` URI protocols.
+
+### Rebuilding the .deb Package
+To build or rebuild the `.deb` package at any time:
+```bash
+./scripts/build_deb.sh
+# or: python3 scripts/build_deb.py
+```
+Outputs:
+- `dist/winscp-linux_1.0.0_amd64.deb`
+- `winscp-linux_1.0.0_amd64.deb` (root directory)
 
 ---
 

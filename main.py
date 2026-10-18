@@ -18,7 +18,8 @@ if os.environ.get("_WINSCP_XCB_LOADED") != "1":
                 os.environ["_WINSCP_XCB_LOADED"] = "1"
                 os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{current_ld}" if current_ld else lib_path
                 try:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    argv = getattr(sys, "orig_argv", [sys.executable] + sys.argv)
+                    os.execv(sys.executable, argv)
                 except Exception:
                     pass
             break
