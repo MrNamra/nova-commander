@@ -31,9 +31,12 @@ from PyQt6.QtGui import (
     QDropEvent,
     QFont,
     QIcon,
+    QKeyEvent,
+    QKeySequence,
     QMouseEvent,
     QPainter,
     QPixmap,
+    QShortcut,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -223,6 +226,7 @@ class CommanderTableWidget(QTableWidget):
     """
 
     items_dropped = pyqtSignal(dict)
+    rename_requested = pyqtSignal()
 
     def __init__(self, pane_type: str, parent: Optional[QWidget] = None):
         super().__init__(0, 4, parent)
@@ -388,6 +392,13 @@ class CommanderTableWidget(QTableWidget):
         else:
             event.ignore()
 
+    def keyPressEvent(self, event: QKeyEvent):
+        if event.key() == Qt.Key.Key_F2:
+            self.rename_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class SessionCommanderView(QWidget):
     """
@@ -504,6 +515,7 @@ class SessionCommanderView(QWidget):
         self.table_local.cellDoubleClicked.connect(self._on_local_double_clicked)
         self.table_local.customContextMenuRequested.connect(self._show_local_context_menu)
         self.table_local.items_dropped.connect(self._handle_items_dropped)
+        self.table_local.rename_requested.connect(lambda: self.rename_selected("local"))
 
         self.btn_remote_go.clicked.connect(self._on_remote_go)
         self.txt_remote_path.returnPressed.connect(self._on_remote_go)
@@ -511,6 +523,7 @@ class SessionCommanderView(QWidget):
         self.table_remote.cellDoubleClicked.connect(self._on_remote_double_clicked)
         self.table_remote.customContextMenuRequested.connect(self._show_remote_context_menu)
         self.table_remote.items_dropped.connect(self._handle_items_dropped)
+        self.table_remote.rename_requested.connect(lambda: self.rename_selected("remote"))
 
     def _wire_sync_engine(self):
         self.sync_engine.sync_started.connect(
@@ -644,12 +657,23 @@ class SessionCommanderView(QWidget):
                     main_win.open_session_dialog()
             return
 
-        session_name = self.current_session.name if self.current_session else ""
+        session = self.current_session
+        host = session.host if session else self.sftp_client.host
+        port = session.port if session else self.sftp_client.port
+        username = session.username if session else self.sftp_client.username
+        password = session.password if session else ""
+        private_key = session.private_key if session else ""
+        passphrase = getattr(session, "passphrase", "") if session else ""
+        session_name = session.name if session else (f"{username}@{host}" if host else "SSH Terminal")
+
         term_win = SSHTerminalWindow(
             ssh_client=self.sftp_client.ssh_client,
-            host=self.sftp_client.host,
-            port=self.sftp_client.port,
-            username=self.sftp_client.username,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            private_key=private_key,
+            passphrase=passphrase,
             session_name=session_name,
             parent=None,
         )
@@ -1289,6 +1313,108 @@ class SessionCommanderView(QWidget):
                 except Exception as exc:
                     QMessageBox.critical(self, "Error", f"Could not delete: {exc}")
 
+    def rename_selected(self, pane: Optional[str] = None):
+        """Renames the selected file or folder in either local or remote pane."""
+        target_pane = pane
+        if not target_pane:
+            if self.table_remote.hasFocus():
+                target_pane = "remote"
+            elif self.table_local.hasFocus():
+                target_pane = "local"
+            elif self.sftp_client.is_connected and len(self.table_remote.selectedItems()) > 0 and len(self.table_local.selectedItems()) == 0:
+                target_pane = "remote"
+            else:
+                target_pane = "local"
+
+        if target_pane == "remote":
+            if not self.sftp_client.is_connected:
+                QMessageBox.warning(self, "Not Connected", "Connect to a remote server before renaming remote files.")
+                return
+
+            selected = self.table_remote.selectedItems()
+            if not selected:
+                QMessageBox.information(self, "Rename", "Please select a remote file or folder to rename.")
+                return
+
+            row = selected[0].row()
+            data = self.table_remote.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                return
+
+            old_name = data["name"]
+            old_path = data["path"]
+
+            new_name, ok = QInputDialog.getText(
+                self,
+                "Rename Remote Item",
+                f"Enter new name for '{old_name}':",
+                QLineEdit.EchoMode.Normal,
+                old_name,
+            )
+            if not ok or not new_name.strip() or new_name.strip() == old_name:
+                return
+
+            clean_name = new_name.strip()
+            parent_dir = str(Path(old_path).parent)
+            new_path = f"{parent_dir.rstrip('/')}/{clean_name}" if parent_dir != "/" else f"/{clean_name}"
+
+            worker = SFTPActionWorker(
+                lambda: self.sftp_client.rename(old_path, new_path),
+                f"Renamed '{old_name}' to '{clean_name}'",
+            )
+            self._active_worker = worker
+            worker.finished.connect(
+                lambda msg: (
+                    self.status_message.emit(msg),
+                    self._load_remote_directory(self.txt_remote_path.text()),
+                )
+            )
+            worker.failed.connect(lambda err: QMessageBox.critical(self, "Rename Failed", f"Could not rename '{old_name}':\n{err}"))
+            worker.start()
+
+        else:
+            selected = self.table_local.selectedItems()
+            if not selected:
+                QMessageBox.information(self, "Rename", "Please select a local file or folder to rename.")
+                return
+
+            row = selected[0].row()
+            data = self.table_local.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                return
+
+            old_name = data["name"]
+            old_path = Path(data["path"])
+
+            new_name, ok = QInputDialog.getText(
+                self,
+                "Rename Local Item",
+                f"Enter new name for '{old_name}':",
+                QLineEdit.EchoMode.Normal,
+                old_name,
+            )
+            if not ok or not new_name.strip() or new_name.strip() == old_name:
+                return
+
+            clean_name = new_name.strip()
+            new_path = old_path.parent / clean_name
+            if new_path.exists():
+                reply = QMessageBox.question(
+                    self,
+                    "Destination Exists",
+                    f"An item named '{clean_name}' already exists. Overwrite?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+            try:
+                old_path.rename(new_path)
+                self.status_message.emit(f"Renamed '{old_name}' to '{clean_name}'")
+                self._load_local_directory(self.txt_local_path.text())
+            except Exception as exc:
+                QMessageBox.critical(self, "Rename Error", f"Could not rename '{old_name}':\n{exc}")
+
     def create_directory(self):
         name, ok = QInputDialog.getText(self, "New Folder", "Directory Name:")
         if not ok or not name.strip():
@@ -1363,6 +1489,8 @@ class SessionCommanderView(QWidget):
         act_open_with = menu.addAction("📂 Open With...")
         act_open_with.triggered.connect(lambda: self.open_selected_local_file(force_open_with=True))
         menu.addSeparator()
+        act_rename = menu.addAction("✏ Rename (F2)")
+        act_rename.triggered.connect(lambda: self.rename_selected("local"))
         act_chmod = menu.addAction("🔒 Properties / Chmod (F9)")
         act_chmod.triggered.connect(self.chmod_selected)
         if self.sftp_client.is_connected:
@@ -1393,6 +1521,8 @@ class SessionCommanderView(QWidget):
         act_down.triggered.connect(self.download_selected)
 
         menu.addSeparator()
+        act_rename = menu.addAction("✏ Rename (F2)")
+        act_rename.triggered.connect(lambda: self.rename_selected("remote"))
         act_chmod = menu.addAction("🔒 Properties / Chmod (F9)")
         act_chmod.triggered.connect(self.chmod_selected)
 
@@ -1426,6 +1556,7 @@ class MainWindow(QMainWindow):
         self._setup_menus()
         self._setup_toolbars()
         self._setup_statusbar()
+        self._setup_global_shortcuts()
 
         # Create initial default session tab
         self.create_session_tab()
@@ -1494,22 +1625,31 @@ class MainWindow(QMainWindow):
         act_download.triggered.connect(self.download_selected)
 
         act_edit = m_cmd.addAction("Edit / Open (F4)")
-        act_edit.setShortcut("F4")
+        act_edit.setShortcut(QKeySequence("F4"))
+        act_edit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_edit.triggered.connect(self.edit_selected_remote_file)
 
         act_open_with = m_cmd.addAction("Open With...")
         act_open_with.triggered.connect(self.open_with_selected)
 
+        act_rename = m_cmd.addAction("Rename (F2)")
+        act_rename.setShortcut(QKeySequence("F2"))
+        act_rename.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_rename.triggered.connect(self.rename_selected)
+
         act_del = m_cmd.addAction("Delete (F8)")
-        act_del.setShortcut("F8")
+        act_del.setShortcut(QKeySequence("F8"))
+        act_del.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_del.triggered.connect(self.delete_selected)
 
         act_mkdir = m_cmd.addAction("New Directory (F7)")
-        act_mkdir.setShortcut("F7")
+        act_mkdir.setShortcut(QKeySequence("F7"))
+        act_mkdir.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_mkdir.triggered.connect(self.create_directory)
 
         act_chmod = m_cmd.addAction("Properties / Chmod (F9)")
-        act_chmod.setShortcut("F9")
+        act_chmod.setShortcut(QKeySequence("F9"))
+        act_chmod.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_chmod.triggered.connect(self.chmod_selected)
 
         m_cmd.addSeparator()
@@ -1518,11 +1658,13 @@ class MainWindow(QMainWindow):
 
         m_cmd.addSeparator()
         act_term = m_cmd.addAction("Open Terminal (Ctrl+T)")
-        act_term.setShortcut("Ctrl+T")
+        act_term.setShortcut(QKeySequence("Ctrl+T"))
+        act_term.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_term.triggered.connect(self.open_terminal)
 
         act_term_win = m_cmd.addAction("Open Terminal in New Window (Ctrl+P)")
-        act_term_win.setShortcut("Ctrl+P")
+        act_term_win.setShortcut(QKeySequence("Ctrl+P"))
+        act_term_win.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_term_win.triggered.connect(self.open_terminal_window)
 
         # View Menu
@@ -1568,6 +1710,10 @@ class MainWindow(QMainWindow):
         self.tb_open_with = toolbar.addAction("📂 Open With")
         self.tb_open_with.triggered.connect(self.open_with_selected)
 
+        self.tb_rename = toolbar.addAction("✏ Rename (F2)")
+        self.tb_rename.setToolTip("Rename selected file or folder (F2)")
+        self.tb_rename.triggered.connect(self.rename_selected)
+
         self.tb_chmod = toolbar.addAction("🔒 Chmod")
         self.tb_chmod.triggered.connect(self.chmod_selected)
 
@@ -1607,6 +1753,20 @@ class MainWindow(QMainWindow):
         self.lbl_session = QLabel("🔴 Not Connected")
         self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
         self.status_bar.addPermanentWidget(self.lbl_session)
+
+    def _setup_global_shortcuts(self):
+        """Configures application-wide hotkeys so they trigger regardless of focused widget."""
+        self.sc_term_win = QShortcut(QKeySequence("Ctrl+P"), self)
+        self.sc_term_win.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.sc_term_win.activated.connect(self.open_terminal_window)
+
+        self.sc_rename = QShortcut(QKeySequence("F2"), self)
+        self.sc_rename.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.sc_rename.activated.connect(self.rename_selected)
+
+        self.sc_term_dock = QShortcut(QKeySequence("Ctrl+T"), self)
+        self.sc_term_dock.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.sc_term_dock.activated.connect(self.open_terminal)
 
     # =========================================================================
     # Multi-Session Tab Management
@@ -1787,6 +1947,10 @@ class MainWindow(QMainWindow):
     def chmod_selected(self):
         if view := self.active_session_view():
             view.chmod_selected()
+
+    def rename_selected(self):
+        if view := self.active_session_view():
+            view.rename_selected()
 
     def delete_selected(self):
         if view := self.active_session_view():

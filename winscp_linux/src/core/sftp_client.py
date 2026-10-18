@@ -100,6 +100,18 @@ class SFTPClient:
     def ssh_client(self) -> Optional[paramiko.SSHClient]:
         return self._ssh
 
+    @property
+    def host(self) -> str:
+        return self._session_info.get("host", "")
+
+    @property
+    def port(self) -> int:
+        return self._session_info.get("port", 22)
+
+    @property
+    def username(self) -> str:
+        return self._session_info.get("username", "")
+
     def connect(
         self,
         host: str,

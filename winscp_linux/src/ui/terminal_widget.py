@@ -438,10 +438,11 @@ class SSHTerminalWindow(QMainWindow):
 
     def _connect_shell(self, ssh_client: Optional[object] = None):
         try:
-            cols = self.terminal_widget.canvas.cols
-            rows = self.terminal_widget.canvas.rows
+            cols = max(80, self.terminal_widget.canvas.cols)
+            rows = max(24, self.terminal_widget.canvas.rows)
+            client = ssh_client if ssh_client is not None else getattr(self, "_active_ssh_client", None)
             self.shell_client.open_shell(
-                ssh_client=ssh_client,
+                ssh_client=client,
                 host=self.host,
                 port=self.port,
                 username=self.username,
@@ -451,6 +452,7 @@ class SSHTerminalWindow(QMainWindow):
                 cols=cols,
                 rows=rows,
             )
+            self._active_ssh_client = client
             user_disp = self.username or "user"
             host_disp = self.host or "remote"
             self.terminal_widget.set_session_info(user_disp, host_disp)

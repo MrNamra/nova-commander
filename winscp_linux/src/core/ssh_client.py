@@ -58,34 +58,51 @@ class SSHShellClient(QObject):
         if ssh_client and ssh_client.get_transport() and ssh_client.get_transport().is_active():
             self._ssh = ssh_client
             self._owns_ssh = False
-        else:
-            # Create dedicated SSH client
-            self._ssh = paramiko.SSHClient()
-            self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            self._owns_ssh = True
+            try:
+                transport = self._ssh.get_transport()
+                self._channel = transport.open_session()
+                self._channel.get_pty(term="xterm-256color", width=cols, height=rows)
+                self._channel.invoke_shell()
+                self._channel.setblocking(0)
 
-            pkey = None
-            if private_key:
-                for kcls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey):
-                    try:
-                        pkey = kcls.from_private_key_file(private_key, password=passphrase or None)
-                        break
-                    except Exception:
-                        pass
-                if pkey is None:
-                    try:
-                        pkey = paramiko.PKey.from_path(private_key, password=passphrase or None)
-                    except Exception:
-                        pass
+                self._running = True
+                self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+                self._reader_thread.start()
+                return
+            except Exception:
+                self._ssh = None
+                self._owns_ssh = True
 
-            self._ssh.connect(
-                hostname=host,
-                port=port,
-                username=username or None,
-                password=password or None,
-                pkey=pkey,
-                timeout=10,
-            )
+        if not host:
+            raise ConnectionError("No active SSH connection or host specified for terminal.")
+
+        # Create dedicated SSH client
+        self._ssh = paramiko.SSHClient()
+        self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self._owns_ssh = True
+
+        pkey = None
+        if private_key:
+            for kcls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey):
+                try:
+                    pkey = kcls.from_private_key_file(private_key, password=passphrase or None)
+                    break
+                except Exception:
+                    pass
+            if pkey is None:
+                try:
+                    pkey = paramiko.PKey.from_path(private_key, password=passphrase or None)
+                except Exception:
+                    pass
+
+        self._ssh.connect(
+            hostname=host,
+            port=port,
+            username=username or None,
+            password=password or None,
+            pkey=pkey,
+            timeout=10,
+        )
 
         transport = self._ssh.get_transport()
         if not transport:

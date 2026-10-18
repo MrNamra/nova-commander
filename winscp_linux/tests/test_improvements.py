@@ -277,3 +277,98 @@ def test_ctrl_p_terminal_shortcut_wiring(qapp):
     assert hasattr(view, "open_terminal_window")
 
     win.close()
+
+
+def test_open_terminal_window_when_sftp_connected(qapp):
+    """Verifies Ctrl+P standalone terminal window launches seamlessly when SFTP is connected."""
+    from src.core.ssh_client import SSHShellClient
+    store = SessionStore()
+    win = MainWindow(store)
+    view = win.active_session_view()
+
+    # Mock an active SFTP connection
+    mock_ssh = MagicMock()
+    mock_transport = MagicMock()
+    mock_transport.is_active.return_value = True
+    mock_ssh.get_transport.return_value = mock_transport
+    mock_sftp = MagicMock()
+
+    view.sftp_client._ssh = mock_ssh
+    view.sftp_client._sftp = mock_sftp
+    view.sftp_client._session_info = {
+        "host": "192.168.1.200",
+        "port": 2222,
+        "username": "developer",
+    }
+    view.current_session = SessionConfig(
+        name="DevServer",
+        host="192.168.1.200",
+        port=2222,
+        username="developer",
+    )
+
+    # Verify sftp_client properties
+    assert view.sftp_client.host == "192.168.1.200"
+    assert view.sftp_client.port == 2222
+    assert view.sftp_client.username == "developer"
+    assert view.sftp_client.is_connected is True
+
+    with patch.object(SSHShellClient, "open_shell") as mock_open_shell:
+        view.open_terminal_window()
+        assert len(view._term_windows) == 1
+        tw = view._term_windows[0]
+        assert "DevServer" in tw.windowTitle()
+        mock_open_shell.assert_called_once()
+        tw.close()
+
+    win.close()
+
+
+def test_f2_rename_local_file(qapp, tmp_path):
+    """Verifies F2 rename for local files."""
+    test_file = tmp_path / "old_name.txt"
+    test_file.write_text("Hello World", encoding="utf-8")
+
+    store = SessionStore()
+    win = MainWindow(store)
+    view = win.active_session_view()
+    view.txt_local_path.setText(str(tmp_path))
+    view._load_local_directory(str(tmp_path))
+
+    # Select the row with old_name.txt
+    target_row = -1
+    for r in range(view.table_local.rowCount()):
+        item = view.table_local.item(r, 0)
+        if item and "old_name.txt" in item.text():
+            target_row = r
+            break
+    assert target_row != -1
+    view.table_local.selectRow(target_row)
+
+    # Mock QInputDialog.getText to provide new name
+    with patch("PyQt6.QtWidgets.QInputDialog.getText", return_value=("new_name.txt", True)):
+        view.rename_selected("local")
+
+    assert not (tmp_path / "old_name.txt").exists()
+    assert (tmp_path / "new_name.txt").exists()
+    assert (tmp_path / "new_name.txt").read_text(encoding="utf-8") == "Hello World"
+
+    win.close()
+
+
+def test_f2_key_press_event_emits_signal(qapp):
+    """Verifies that pressing F2 in CommanderTableWidget emits rename_requested."""
+    from src.ui.main_window import CommanderTableWidget
+    table = CommanderTableWidget("local")
+
+    signal_received = []
+    table.rename_requested.connect(lambda: signal_received.append(True))
+
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtCore import QEvent
+
+    key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_F2, Qt.KeyboardModifier.NoModifier)
+    table.keyPressEvent(key_event)
+
+    assert len(signal_received) == 1, "F2 key press did not emit rename_requested signal!"
+    table.close()
