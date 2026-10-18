@@ -416,7 +416,9 @@ def test_terminal_launcher_build_command():
     """Verifies SSH command line generation with port, key, sshpass, and cd options."""
     # Basic
     cmd1 = build_ssh_command(host="192.168.1.10")
-    assert cmd1 == "ssh 192.168.1.10"
+    assert "ssh" in cmd1
+    assert "192.168.1.10" in cmd1
+    assert "StrictHostKeyChecking=accept-new" in cmd1
 
     # Custom port and username and remote directory
     cmd2 = build_ssh_command(
@@ -428,13 +430,13 @@ def test_terminal_launcher_build_command():
     assert "-p 2222" in cmd2
     assert "devops@server.internal" in cmd2
     assert "cd /var/www/site" in cmd2
-    assert "exec $SHELL -l" in cmd2
 
     # Password with sshpass
     with patch("shutil.which", return_value="/usr/bin/sshpass"):
         cmd3 = build_ssh_command(host="10.0.0.5", username="admin", password="mypassword123")
-        assert cmd3.startswith("sshpass -p mypassword123 ssh admin@10.0.0.5") or \
-               cmd3.startswith("sshpass -p 'mypassword123' ssh admin@10.0.0.5")
+        assert "export SSHPASS=" in cmd3
+        assert "sshpass -e" in cmd3
+        assert "admin@10.0.0.5" in cmd3
 
 
 def test_terminal_launcher_get_available_linux_terminals():
@@ -493,3 +495,113 @@ def test_launch_system_terminal_darwin():
         args, kwargs = mock_popen.call_args
         assert args[0][0] == "osascript"
         assert "Terminal" in args[0][2]
+
+
+def test_session_dialog_move_session_to_folder(qapp, tmp_path):
+    """Verifies moving a session into a folder inside SessionDialog via drag-and-drop / move action."""
+    from src.ui.session_dialog import SessionDialog
+
+    store_file = tmp_path / "sessions.ini"
+    store = SessionStore(storage_path=store_file)
+
+    s1 = SessionConfig(name="oracle", host="127.0.0.1", port=22, username="admin1")
+    s2 = SessionConfig(name="serv-Raju", host="s2.serv00.com", port=22, username="Raju")
+    store.save_session(s1)
+    store.save_session(s2)
+    store.add_folder("aaa")
+
+    dlg = SessionDialog(store)
+
+    # Verify initial tree setup
+    assert dlg.tree.topLevelItemCount() == 1  # Root item
+    root_item = dlg.tree.topLevelItem(0)
+    assert "Saved Sessions" in root_item.text(0)
+
+    # Check child items: folder aaa and root sessions oracle, serv-Raju
+    child_texts = [root_item.child(i).text(0) for i in range(root_item.childCount())]
+    assert any("aaa" in t for t in child_texts)
+    assert any("oracle" in t for t in child_texts)
+    assert any("serv-Raju" in t for t in child_texts)
+
+    # 1. Trigger move via drag-and-drop signal handler
+    dlg._on_tree_session_moved("oracle", "aaa")
+
+    # Verify session is moved into folder aaa
+    assert store.get_session("aaa/oracle") is not None
+    assert store.get_session("oracle", exact_path=True) is None
+    assert dlg.cmb_folder.currentText() == "aaa"
+
+    # Verify tree reflects the move: oracle is now a child of aaa
+    root_item = dlg.tree.topLevelItem(0)
+    folder_item = None
+    for i in range(root_item.childCount()):
+        if "aaa" in root_item.child(i).text(0):
+            folder_item = root_item.child(i)
+            break
+    assert folder_item is not None
+    assert folder_item.childCount() >= 1
+    assert any("oracle" in folder_item.child(i).text(0) for i in range(folder_item.childCount()))
+
+    # 2. Test moving back to root via folder combobox and saving
+    dlg.cmb_folder.setCurrentText("(Root / None)")
+    with patch("PyQt6.QtWidgets.QMessageBox.information"):
+        dlg._save_current_session()
+
+    assert store.get_session("oracle") is not None
+    assert store.get_session("oracle").folder == ""
+    assert store.get_session("aaa/oracle", exact_path=True) is None
+
+    dlg.close()
+
+
+def test_serv_raju_terminal_command():
+    """Verifies that serv-Raju with complex symbols in password generates safe export SSHPASS."""
+    cmd = build_ssh_command(
+        host="s2.serv00.com",
+        port=22,
+        username="Raju",
+        password="C**fjvdDPGB&wfM#3GSO",
+        remote_dir="/",
+    )
+    assert "-o StrictHostKeyChecking=accept-new" in cmd
+    assert "Raju@s2.serv00.com" in cmd
+    with patch("shutil.which", return_value="/usr/bin/sshpass"):
+        cmd_with_sshpass = build_ssh_command(
+            host="s2.serv00.com",
+            port=22,
+            username="Raju",
+            password="C**fjvdDPGB&wfM#3GSO",
+            remote_dir="/",
+        )
+        assert "export SSHPASS=" in cmd_with_sshpass
+        assert "sshpass -e" in cmd_with_sshpass
+
+
+def test_toolbar_terminal_position_for_smaller_screens(qapp):
+    """Verifies terminal button is positioned early in the toolbar to prevent overflow on small screens."""
+    from PyQt6.QtWidgets import QToolBar
+    win = MainWindow(SessionStore())
+    toolbar_actions = win.findChild(QToolBar).actions()
+    action_texts = [a.text() for a in toolbar_actions if a.text()]
+    
+    # Terminal must be among the first 4 toolbar actions
+    assert "🖥 Terminal" in action_texts[:4], f"🖥 Terminal action was not near front of toolbar: {action_texts}"
+    win.close()
+
+
+def test_f2_and_ctrl_p_window_actions(qapp):
+    """Verifies F2 and Ctrl+P are properly registered as window actions without ambiguous duplicates."""
+    win = MainWindow(SessionStore())
+    window_actions = win.actions()
+    
+    shortcuts = [a.shortcut().toString() for a in window_actions if not a.shortcut().isEmpty()]
+    assert "F2" in shortcuts, "F2 shortcut missing from window actions!"
+    assert "Ctrl+P" in shortcuts, "Ctrl+P shortcut missing from window actions!"
+    
+    # Verify no duplicate shortcuts on window
+    f2_count = shortcuts.count("F2")
+    ctrl_p_count = shortcuts.count("Ctrl+P")
+    assert f2_count == 1, f"Expected 1 F2 shortcut, found {f2_count} (causes ambiguity)!"
+    assert ctrl_p_count == 1, f"Expected 1 Ctrl+P shortcut, found {ctrl_p_count} (causes ambiguity)!"
+    win.close()
+

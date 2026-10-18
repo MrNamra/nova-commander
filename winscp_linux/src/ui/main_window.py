@@ -499,6 +499,9 @@ class SessionCommanderView(QWidget):
         self.table_local.customContextMenuRequested.connect(self._show_local_context_menu)
         self.table_local.items_dropped.connect(self._handle_items_dropped)
         self.table_local.rename_requested.connect(lambda: self.rename_selected("local"))
+        self._last_active_pane = "local"
+        self.table_local.itemSelectionChanged.connect(lambda: setattr(self, "_last_active_pane", "local"))
+        self.table_local.cellClicked.connect(lambda r, c: setattr(self, "_last_active_pane", "local"))
 
         self.btn_remote_go.clicked.connect(self._on_remote_go)
         self.txt_remote_path.returnPressed.connect(self._on_remote_go)
@@ -507,6 +510,8 @@ class SessionCommanderView(QWidget):
         self.table_remote.customContextMenuRequested.connect(self._show_remote_context_menu)
         self.table_remote.items_dropped.connect(self._handle_items_dropped)
         self.table_remote.rename_requested.connect(lambda: self.rename_selected("remote"))
+        self.table_remote.itemSelectionChanged.connect(lambda: setattr(self, "_last_active_pane", "remote"))
+        self.table_remote.cellClicked.connect(lambda r, c: setattr(self, "_last_active_pane", "remote"))
 
     def _wire_sync_engine(self):
         self.sync_engine.sync_started.connect(
@@ -1281,11 +1286,13 @@ class SessionCommanderView(QWidget):
         """Renames the selected file or folder in either local or remote pane."""
         target_pane = pane
         if not target_pane:
-            if self.table_remote.hasFocus():
+            if self.table_remote.hasFocus() or self.table_remote.viewport().hasFocus():
                 target_pane = "remote"
-            elif self.table_local.hasFocus():
+            elif self.table_local.hasFocus() or self.table_local.viewport().hasFocus():
                 target_pane = "local"
-            elif self.sftp_client.is_connected and len(self.table_remote.selectedItems()) > 0 and len(self.table_local.selectedItems()) == 0:
+            elif getattr(self, "_last_active_pane", "") in ("local", "remote"):
+                target_pane = self._last_active_pane
+            elif self.sftp_client.is_connected and len(self.table_remote.selectedItems()) > 0:
                 target_pane = "remote"
             else:
                 target_pane = "local"
@@ -1593,31 +1600,36 @@ class MainWindow(QMainWindow):
 
         act_edit = m_cmd.addAction("Edit / Open (F4)")
         act_edit.setShortcut(QKeySequence("F4"))
-        act_edit.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_edit.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_edit.triggered.connect(self.edit_selected_remote_file)
+        self.addAction(act_edit)
 
         act_open_with = m_cmd.addAction("Open With...")
         act_open_with.triggered.connect(self.open_with_selected)
 
         act_rename = m_cmd.addAction("Rename (F2)")
         act_rename.setShortcut(QKeySequence("F2"))
-        act_rename.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_rename.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_rename.triggered.connect(self.rename_selected)
+        self.addAction(act_rename)
 
         act_del = m_cmd.addAction("Delete (F8)")
         act_del.setShortcut(QKeySequence("F8"))
-        act_del.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_del.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_del.triggered.connect(self.delete_selected)
+        self.addAction(act_del)
 
         act_mkdir = m_cmd.addAction("New Directory (F7)")
         act_mkdir.setShortcut(QKeySequence("F7"))
-        act_mkdir.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_mkdir.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_mkdir.triggered.connect(self.create_directory)
+        self.addAction(act_mkdir)
 
         act_chmod = m_cmd.addAction("Properties / Chmod (F9)")
         act_chmod.setShortcut(QKeySequence("F9"))
-        act_chmod.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_chmod.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_chmod.triggered.connect(self.chmod_selected)
+        self.addAction(act_chmod)
 
         m_cmd.addSeparator()
         act_pref_editor = m_cmd.addAction("Configure Default Applications...")
@@ -1626,14 +1638,17 @@ class MainWindow(QMainWindow):
         m_cmd.addSeparator()
         act_term_win = m_cmd.addAction("Open in System Terminal (Ctrl+P)")
         act_term_win.setShortcut(QKeySequence("Ctrl+P"))
-        act_term_win.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_term_win.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_term_win.triggered.connect(self.open_terminal_window)
+        self.addAction(act_term_win)
 
         # View Menu
         m_view = menubar.addMenu("&View")
         act_refresh = m_view.addAction("Refresh (Ctrl+R)")
-        act_refresh.setShortcut("Ctrl+R")
+        act_refresh.setShortcut(QKeySequence("Ctrl+R"))
+        act_refresh.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_refresh.triggered.connect(self.refresh_both)
+        self.addAction(act_refresh)
 
         # Help Menu
         m_help = menubar.addMenu("&Help")
@@ -1645,12 +1660,17 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self.tb_connect = toolbar.addAction("🔌 Connect / New Tab")
+        self.tb_connect = toolbar.addAction("🔌 Connect")
+        self.tb_connect.setToolTip("Connect to SSH / SFTP Session (Ctrl+N)")
         self.tb_connect.triggered.connect(self.open_session_dialog)
 
         self.tb_disconnect = toolbar.addAction("⏹ Disconnect")
         self.tb_disconnect.setEnabled(False)
         self.tb_disconnect.triggered.connect(self.disconnect_session)
+
+        self.tb_term_win = toolbar.addAction("🖥 Terminal")
+        self.tb_term_win.setToolTip("Open System Terminal (Ctrl+P)")
+        self.tb_term_win.triggered.connect(self.open_terminal_window)
 
         toolbar.addSeparator()
 
@@ -1669,8 +1689,8 @@ class MainWindow(QMainWindow):
         self.tb_open_with = toolbar.addAction("📂 Open With")
         self.tb_open_with.triggered.connect(self.open_with_selected)
 
-        self.tb_rename = toolbar.addAction("✏ Rename (F2)")
-        self.tb_rename.setToolTip("Rename selected file or folder (F2)")
+        self.tb_rename = toolbar.addAction("✏ Rename")
+        self.tb_rename.setToolTip("Rename selected item (F2)")
         self.tb_rename.triggered.connect(self.rename_selected)
 
         self.tb_chmod = toolbar.addAction("🔒 Chmod")
@@ -1681,12 +1701,6 @@ class MainWindow(QMainWindow):
 
         self.tb_mkdir = toolbar.addAction("📁 New Folder")
         self.tb_mkdir.triggered.connect(self.create_directory)
-
-        toolbar.addSeparator()
-
-        self.tb_term_win = toolbar.addAction("🖥 System Terminal (Ctrl+P)")
-        self.tb_term_win.setToolTip("Open native OS terminal connected via SSH (Ctrl+P)")
-        self.tb_term_win.triggered.connect(self.open_terminal_window)
 
         # Cloud backup hidden for now per user request
         self.tb_cloud = toolbar.addAction("☁ Cloud Backup")
@@ -1712,14 +1726,8 @@ class MainWindow(QMainWindow):
         self.status_bar.addPermanentWidget(self.lbl_session)
 
     def _setup_global_shortcuts(self):
-        """Configures application-wide hotkeys so they trigger regardless of focused widget."""
-        self.sc_term_win = QShortcut(QKeySequence("Ctrl+P"), self)
-        self.sc_term_win.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.sc_term_win.activated.connect(self.open_terminal_window)
-
-        self.sc_rename = QShortcut(QKeySequence("F2"), self)
-        self.sc_rename.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.sc_rename.activated.connect(self.rename_selected)
+        """Global shortcuts are registered as window actions in _setup_menubar to avoid ambiguity."""
+        pass
 
     # =========================================================================
     # Multi-Session Tab Management

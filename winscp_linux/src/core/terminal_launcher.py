@@ -26,7 +26,7 @@ def build_ssh_command(
     remote_dir: str = "",
 ) -> str:
     """Builds a portable SSH command line string with optional sshpass support."""
-    ssh_parts = ["ssh"]
+    ssh_parts = ["ssh", "-o", "StrictHostKeyChecking=accept-new"]
     if port and int(port) != 22:
         ssh_parts.extend(["-p", str(port)])
     if private_key and os.path.exists(private_key):
@@ -36,13 +36,13 @@ def build_ssh_command(
     ssh_parts.append(shlex.quote(user_host))
 
     if remote_dir and remote_dir not in ("/", "~"):
-        cd_cmd = f"cd {shlex.quote(remote_dir)} 2>/dev/null || true; exec $SHELL -l"
+        cd_cmd = f"cd {shlex.quote(remote_dir)} 2>/dev/null || cd ~; exec ${{SHELL:-sh}} -l"
         ssh_parts.extend(["-t", shlex.quote(cd_cmd)])
 
     base_cmd = " ".join(ssh_parts)
 
     if password and shutil.which("sshpass"):
-        return f"sshpass -p {shlex.quote(password)} {base_cmd}"
+        return f"export SSHPASS={shlex.quote(password)} && sshpass -e {base_cmd}"
 
     return base_cmd
 
@@ -79,6 +79,9 @@ def launch_system_terminal(
     connecting directly to the remote server via SSH.
     """
     clean_env = get_clean_editor_env()
+    if password:
+        clean_env["SSHPASS"] = password
+
     title = session_name or (f"SSH: {username}@{host}" if username else f"SSH: {host}")
     ssh_cmd = build_ssh_command(
         host=host,
@@ -138,8 +141,13 @@ def launch_system_terminal(
             raise FileNotFoundError("No Linux terminal emulator (gnome-terminal, konsole, xterm, etc.) found.")
         term_bin = installed[0]
 
-    # Command wrapped with bash to pause with error message if SSH exits with an error
-    run_bash = f'{ssh_cmd} || (echo -e "\\n\\033[31m[SSH connection exited with error]\\033[0m Press Enter to close..." && read -n 1)'
+    # Command wrapped with bash to pause with error message only if SSH exits with an error
+    run_bash = (
+        f'{ssh_cmd}; ret=$?; '
+        f'if [ $ret -ne 0 ]; then '
+        f'echo -e "\\n\\033[31m[SSH connection exited with error code $ret]\\033[0m Press Enter to close..."; '
+        f'read -r; fi'
+    )
 
     cmd: List[str] = []
     base_name = Path(term_bin).name

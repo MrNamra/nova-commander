@@ -9,9 +9,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -110,6 +112,114 @@ class KeyManagerDialog(QDialog):
             self.accept()
 
 
+class SessionTreeWidget(QTreeWidget):
+    """
+    Drag-and-drop enabled TreeWidget for Saved Sites and Folders.
+    Allows moving sessions between folders by dragging, right-click actions,
+    and inline rename (F2).
+    """
+
+    session_moved = pyqtSignal(str, str)  # (source_session_full_path, target_folder)
+    rename_requested = pyqtSignal()
+    delete_requested = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setHeaderHidden(True)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_F2:
+            self.rename_requested.emit()
+            return
+        elif event.key() == Qt.Key.Key_Delete:
+            self.delete_requested.emit()
+            return
+        super().keyPressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.source() == self:
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.source() == self:
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.source() != self:
+            super().dropEvent(event)
+            return
+
+        dragged_items = self.selectedItems()
+        if not dragged_items:
+            event.ignore()
+            return
+
+        dragged_item = dragged_items[0]
+        dragged_data = dragged_item.data(0, Qt.ItemDataRole.UserRole)
+        if not dragged_data:
+            event.ignore()
+            return
+
+        # Target item where user dropped
+        target_item = self.itemAt(event.position().toPoint())
+        target_folder = ""
+
+        if target_item:
+            target_data = target_item.data(0, Qt.ItemDataRole.UserRole)
+            if target_data:
+                target_type = target_data.get("type")
+                if target_type == "folder":
+                    target_folder = target_data.get("name", "")
+                elif target_type == "session":
+                    target_cfg = target_data.get("config")
+                    target_folder = target_cfg.folder if target_cfg else ""
+                elif target_type == "root":
+                    target_folder = ""
+
+        item_type = dragged_data.get("type")
+        from PyQt6.QtCore import QTimer
+        if item_type == "session":
+            cfg: SessionConfig = dragged_data.get("config")
+            if not cfg:
+                event.ignore()
+                return
+            if cfg.folder == target_folder:
+                event.ignore()
+                return
+
+            event.acceptProposedAction()
+            src_full_path = cfg.full_path
+            dest_folder = target_folder
+            QTimer.singleShot(0, lambda: self.session_moved.emit(src_full_path, dest_folder))
+            return
+
+        elif item_type == "folder":
+            folder_name = dragged_data.get("name", "")
+            if not folder_name or target_folder == folder_name or target_folder.startswith(folder_name + "/"):
+                event.ignore()
+                return
+            new_f_path = f"{target_folder}/{folder_name}" if target_folder else folder_name
+            if new_f_path != folder_name:
+                event.acceptProposedAction()
+                f_name = folder_name
+                dest_f = target_folder
+                QTimer.singleShot(0, lambda: self.session_moved.emit(f"__FOLDER__:{f_name}", dest_f))
+                return
+
+        event.ignore()
+
+
 class SessionDialog(QDialog):
     """
     WinSCP-Style Session Login Dialog.
@@ -146,18 +256,25 @@ class SessionDialog(QDialog):
         lbl_sites.setStyleSheet("font-weight: bold;")
         left_layout.addWidget(lbl_sites)
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
+        self.tree = SessionTreeWidget(self)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self.tree.session_moved.connect(self._on_tree_session_moved)
+        self.tree.rename_requested.connect(self._rename_selected)
+        self.tree.delete_requested.connect(self._delete_selected)
+        self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
+        self.tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         left_layout.addWidget(self.tree)
 
-        # Left buttons: New Site, New Folder, Delete
+        # Left buttons: New Site, New Folder, Move, Delete
         left_btn_layout = QHBoxLayout()
         self.btn_new_site = QPushButton("+ Site")
         self.btn_new_folder = QPushButton("+ Folder")
+        self.btn_move = QPushButton("Move...")
+        self.btn_move.setToolTip("Move selected session into a folder")
         self.btn_del_site = QPushButton("Delete")
         left_btn_layout.addWidget(self.btn_new_site)
         left_btn_layout.addWidget(self.btn_new_folder)
+        left_btn_layout.addWidget(self.btn_move)
         left_btn_layout.addWidget(self.btn_del_site)
         left_layout.addLayout(left_btn_layout)
 
@@ -175,6 +292,10 @@ class SessionDialog(QDialog):
 
         self.txt_session_name = QLineEdit("New Session")
         form.addRow("Session Name:", self.txt_session_name)
+
+        self.cmb_folder = QComboBox()
+        self.cmb_folder.setEditable(True)
+        form.addRow("Folder:", self.cmb_folder)
 
         # Protocol & Port
         proto_layout = QHBoxLayout()
@@ -273,6 +394,7 @@ class SessionDialog(QDialog):
         # Connections
         self.btn_new_site.clicked.connect(self._create_new_site)
         self.btn_new_folder.clicked.connect(self._create_new_folder)
+        self.btn_move.clicked.connect(self._move_selected)
         self.btn_del_site.clicked.connect(self._delete_selected)
         self.btn_save.clicked.connect(self._save_current_session)
         self.btn_login.clicked.connect(self._on_login)
@@ -280,17 +402,50 @@ class SessionDialog(QDialog):
         self.btn_manage_keys.clicked.connect(self._open_key_manager)
         self.btn_cancel.clicked.connect(self.reject)
 
+    def _refresh_folder_combo(self, selected_folder: str = ""):
+        """Populates the Folder dropdown with all existing folders and selects the current one."""
+        if not hasattr(self, "cmb_folder"):
+            return
+        self.cmb_folder.blockSignals(True)
+        self.cmb_folder.clear()
+        self.cmb_folder.addItem("(Root / None)", "")
+        for f in self.session_store.get_folders():
+            self.cmb_folder.addItem(f, f)
+
+        if selected_folder:
+            idx = self.cmb_folder.findData(selected_folder)
+            if idx >= 0:
+                self.cmb_folder.setCurrentIndex(idx)
+            else:
+                self.cmb_folder.setEditText(selected_folder)
+        else:
+            self.cmb_folder.setCurrentIndex(0)
+        self.cmb_folder.blockSignals(False)
+
     def refresh_session_tree(self, select_session_name: Optional[str] = None):
         """Populates the tree widget with folders and sessions."""
         self.tree.clear()
         sessions = self.session_store.list_sessions()
+        folders = self.session_store.get_folders()
 
         folder_nodes: dict[str, QTreeWidgetItem] = {}
 
         # Root folder item
         root_node = QTreeWidgetItem(self.tree, ["📁 Saved Sessions"])
+        root_node.setData(0, Qt.ItemDataRole.UserRole, {"type": "root", "name": ""})
         root_node.setExpanded(True)
 
+        # 1. Register all folder items (even empty ones)
+        for folder_name in folders:
+            clean_f = folder_name.strip()
+            if clean_f and clean_f not in folder_nodes:
+                f_item = QTreeWidgetItem(root_node, [f"📁 {clean_f}"])
+                f_item.setExpanded(True)
+                f_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "name": clean_f})
+                folder_nodes[clean_f] = f_item
+
+        # 2. Add all sessions
+        target_item_to_select = None
         for s in sessions:
             if s.folder.strip():
                 folder_name = s.folder.strip()
@@ -307,7 +462,14 @@ class SessionDialog(QDialog):
             s_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "session", "config": s})
 
             if select_session_name and (s.name == select_session_name or s.full_path == select_session_name):
-                self.tree.setCurrentItem(s_item)
+                target_item_to_select = s_item
+
+        self.tree.expandAll()
+        if target_item_to_select:
+            self.tree.setCurrentItem(target_item_to_select)
+            self.tree.scrollToItem(target_item_to_select, QAbstractItemView.ScrollHint.EnsureVisible)
+
+        self._refresh_folder_combo(self._active_config.folder if self._active_config else "")
 
     def _on_tree_selection_changed(self):
         items = self.tree.selectedItems()
@@ -325,6 +487,7 @@ class SessionDialog(QDialog):
     def _load_session_into_fields(self, s: SessionConfig):
         self._active_config = s
         self.txt_session_name.setText(s.name)
+        self._refresh_folder_combo(s.folder)
         self.txt_host.setText(s.host)
         self.spin_port.setValue(s.port)
         self.txt_user.setText(s.username)
@@ -336,8 +499,9 @@ class SessionDialog(QDialog):
         self.txt_local_dir.setText(s.local_dir or str(Path.home()))
         self.txt_comment.setText(s.comment or "")
 
-    def _create_new_site(self):
+    def _create_new_site(self, prefill_folder: str = ""):
         self.txt_session_name.setText("New Session")
+        self._refresh_folder_combo(prefill_folder)
         self.txt_host.clear()
         self.txt_user.clear()
         self.txt_password.clear()
@@ -354,10 +518,214 @@ class SessionDialog(QDialog):
     def _create_new_folder(self):
         name, ok = QInputDialog.getText(self, "New Folder", "Folder Name:")
         if ok and name.strip():
-            # Add dummy session to establish folder
-            dummy = SessionConfig(name="Example", host="127.0.0.1", folder=name.strip())
-            self.session_store.save_session(dummy)
+            clean_name = name.strip().strip("/")
+            self.session_store.add_folder(clean_name)
             self.refresh_session_tree()
+            self._refresh_folder_combo(clean_name)
+
+    # ----------------- Move & Reorganize -----------------
+    def _on_tree_session_moved(self, source_path: str, target_folder: str):
+        """Called by SessionTreeWidget when an item is dragged and dropped."""
+        if source_path.startswith("__FOLDER__:"):
+            folder_name = source_path[len("__FOLDER__:"): ]
+            new_f_path = f"{target_folder}/{folder_name}" if target_folder else folder_name
+            self.session_store.rename_folder(folder_name, new_f_path)
+            self.refresh_session_tree()
+            return
+
+        moved = self.session_store.move_session(source_path, target_folder)
+        if moved:
+            self.refresh_session_tree(select_session_name=moved.full_path)
+            self._load_session_into_fields(moved)
+
+    def _move_selected(self):
+        """Triggered by the 'Move...' button under the tree."""
+        items = self.tree.selectedItems()
+        if not items:
+            QMessageBox.information(self, "No Selection", "Please select a session or folder to move.")
+            return
+
+        data = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        if data.get("type") == "session":
+            s: SessionConfig = data["config"]
+            self._prompt_move_session(s.full_path, s.folder)
+        elif data.get("type") == "folder":
+            folder_name = data.get("name", "")
+            self._prompt_move_folder(folder_name)
+
+    def _prompt_move_session(self, session_path: str, current_folder: str):
+        """Displays a dialog allowing the user to select destination folder for a session."""
+        existing_folders = self.session_store.get_folders()
+        options = ["(Root / No Folder)"] + [f for f in existing_folders if f != current_folder] + ["+ New Folder..."]
+
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Move Session",
+            f"Select destination folder for '{Path(session_path).name}':",
+            options,
+            0,
+            False,
+        )
+        if not ok or not choice:
+            return
+
+        if choice == "+ New Folder...":
+            new_name, ok_n = QInputDialog.getText(self, "New Folder", "Enter new folder name:")
+            if ok_n and new_name.strip():
+                dest_folder = new_name.strip().strip("/")
+                self.session_store.add_folder(dest_folder)
+            else:
+                return
+        elif choice == "(Root / No Folder)":
+            dest_folder = ""
+        else:
+            dest_folder = choice
+
+        moved = self.session_store.move_session(session_path, dest_folder)
+        if moved:
+            self.refresh_session_tree(select_session_name=moved.full_path)
+            self._load_session_into_fields(moved)
+
+    def _prompt_move_folder(self, folder_name: str):
+        """Displays a dialog allowing the user to re-parent a folder."""
+        existing_folders = [f for f in self.session_store.get_folders() if f != folder_name and not f.startswith(folder_name + "/")]
+        options = ["(Root / Top Level)"] + existing_folders + ["+ New Parent Folder..."]
+
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Move Folder",
+            f"Select parent destination for folder '{folder_name}':",
+            options,
+            0,
+            False,
+        )
+        if not ok or not choice:
+            return
+
+        if choice == "+ New Parent Folder...":
+            new_name, ok_n = QInputDialog.getText(self, "New Folder", "Enter new parent folder name:")
+            if ok_n and new_name.strip():
+                dest_parent = new_name.strip().strip("/")
+                self.session_store.add_folder(dest_parent)
+            else:
+                return
+        elif choice == "(Root / Top Level)":
+            dest_parent = ""
+        else:
+            dest_parent = choice
+
+        base_name = folder_name.split("/")[-1]
+        new_folder_path = f"{dest_parent}/{base_name}" if dest_parent else base_name
+        self.session_store.rename_folder(folder_name, new_folder_path)
+        self.refresh_session_tree()
+
+    def _show_tree_context_menu(self, pos: QPoint):
+        """Right-click context menu for sessions and folders in the tree."""
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
+        menu = QMenu(self)
+        item_type = data.get("type")
+
+        if item_type == "session":
+            s: SessionConfig = data["config"]
+
+            act_login = menu.addAction("🚀 Connect / Login")
+            act_login.triggered.connect(self._on_login)
+            menu.addSeparator()
+
+            # Move submenu
+            move_menu = menu.addMenu("📁 Move to Folder")
+            if s.folder:
+                act_root = move_menu.addAction("📂 (Root / No Folder)")
+                act_root.triggered.connect(lambda: self._on_tree_session_moved(s.full_path, ""))
+
+            for f in self.session_store.get_folders():
+                if f != s.folder:
+                    act_f = move_menu.addAction(f"📁 {f}")
+                    act_f.triggered.connect(lambda checked=False, target_f=f: self._on_tree_session_moved(s.full_path, target_f))
+
+            move_menu.addSeparator()
+            act_new_f = move_menu.addAction("➕ Move to New Folder...")
+            act_new_f.triggered.connect(lambda: self._prompt_move_session(s.full_path, s.folder))
+
+            menu.addSeparator()
+            act_rename = menu.addAction("✏ Rename (F2)")
+            act_rename.triggered.connect(lambda: self._rename_session(s.full_path))
+
+            act_dup = menu.addAction("📋 Duplicate Site")
+            act_dup.triggered.connect(lambda: self._duplicate_session(s.full_path))
+
+            menu.addSeparator()
+            act_del = menu.addAction("🗑 Delete")
+            act_del.triggered.connect(self._delete_selected)
+
+        elif item_type == "folder":
+            folder_name = data.get("name", "")
+
+            act_new_site = menu.addAction(f"➕ New Site in '{folder_name}'...")
+            act_new_site.triggered.connect(lambda: self._create_new_site(prefill_folder=folder_name))
+
+            menu.addSeparator()
+            act_rename_f = menu.addAction("✏ Rename Folder (F2)")
+            act_rename_f.triggered.connect(lambda: self._rename_folder(folder_name))
+
+            act_del_f = menu.addAction("🗑 Delete Folder")
+            act_del_f.triggered.connect(lambda: self._delete_folder(folder_name))
+
+        menu.exec(self.tree.mapToGlobal(pos))
+
+    def _on_tree_double_clicked(self, item: QTreeWidgetItem, column: int):
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        if data.get("type") == "session":
+            self._on_login()
+        elif data.get("type") in ("folder", "root"):
+            item.setExpanded(not item.isExpanded())
+
+    def _rename_selected(self):
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        data = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        if data.get("type") == "session":
+            self._rename_session(data["config"].full_path)
+        elif data.get("type") == "folder":
+            self._rename_folder(data.get("name", ""))
+
+    def _rename_session(self, full_path: str):
+        session = self.session_store.get_session(full_path)
+        if not session:
+            return
+        new_name, ok = QInputDialog.getText(self, "Rename Session", "Session Name:", text=session.name)
+        if ok and new_name.strip() and new_name.strip() != session.name:
+            renamed = self.session_store.rename_session(full_path, new_name.strip())
+            if renamed:
+                self.refresh_session_tree(select_session_name=renamed.full_path)
+                self._load_session_into_fields(renamed)
+
+    def _rename_folder(self, folder_name: str):
+        new_name, ok = QInputDialog.getText(self, "Rename Folder", "Folder Name:", text=folder_name)
+        if ok and new_name.strip() and new_name.strip() != folder_name:
+            self.session_store.rename_folder(folder_name, new_name.strip())
+            self.refresh_session_tree()
+
+    def _duplicate_session(self, full_path: str):
+        copy_cfg = self.session_store.duplicate_session(full_path)
+        if copy_cfg:
+            self.refresh_session_tree(select_session_name=copy_cfg.full_path)
+            self._load_session_into_fields(copy_cfg)
 
     def _delete_selected(self):
         items = self.tree.selectedItems()
@@ -380,6 +748,20 @@ class SessionDialog(QDialog):
                 self.session_store.delete_session(s.full_path)
                 self.refresh_session_tree()
                 self._create_new_site()
+        elif data.get("type") == "folder":
+            self._delete_folder(data.get("name", ""))
+
+    def _delete_folder(self, folder_name: str):
+        reply = QMessageBox.question(
+            self,
+            "Delete Folder",
+            f"Are you sure you want to delete folder '{folder_name}' and all its sessions?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.session_store.delete_folder(folder_name, delete_sessions=True)
+            self.refresh_session_tree()
+            self._create_new_site()
 
     def _toggle_password_visibility(self, checked: bool):
         if checked:
@@ -414,7 +796,10 @@ class SessionDialog(QDialog):
 
     def _get_current_fields_config(self) -> SessionConfig:
         name = self.txt_session_name.text().strip() or "Unnamed"
-        folder = self._active_config.folder if self._active_config else ""
+        folder_text = self.cmb_folder.currentText().strip()
+        if folder_text in ("(Root / None)", "(Root)", "None", "/"):
+            folder_text = ""
+        folder = folder_text.strip("/")
         return SessionConfig(
             name=name,
             host=self.txt_host.text().strip(),
@@ -436,7 +821,12 @@ class SessionDialog(QDialog):
             QMessageBox.warning(self, "Missing Host", "Please specify a Host Name.")
             return
 
+        # If existing session changed full_path (folder or name changed), remove old key
+        if self._active_config and self._active_config.full_path != cfg.full_path:
+            self.session_store.delete_session(self._active_config.full_path)
+
         self.session_store.save_session(cfg)
+        self._active_config = cfg
         self.refresh_session_tree(select_session_name=cfg.full_path)
         QMessageBox.information(self, "Saved", f"Session '{cfg.full_path}' saved successfully.")
 

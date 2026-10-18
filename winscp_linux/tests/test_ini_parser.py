@@ -164,3 +164,59 @@ UserName=new_user
     new_s = store.get_session("NewServer")
     assert new_s is not None
     assert new_s.host == "10.0.0.1"
+
+
+def test_move_session_to_folder(tmp_path: Path):
+    """Verifies moving a session into a folder, re-parenting, and returning to root."""
+    store_file = tmp_path / "sessions.ini"
+    store = SessionStore(storage_path=store_file)
+
+    s = SessionConfig(name="oracle", host="127.0.0.1", port=22, username="admin1")
+    store.save_session(s)
+    assert store.get_session("oracle") is not None
+    assert store.get_session("oracle").folder == ""
+
+    # Move oracle into folder 'aaa'
+    moved = store.move_session("oracle", "aaa")
+    assert moved is not None
+    assert moved.full_path == "aaa/oracle"
+    assert moved.folder == "aaa"
+    assert store.get_session("aaa/oracle") is not None
+    assert store.get_session("oracle", exact_path=True) is None  # Old key removed
+    assert "oracle" not in store._sessions
+
+    # Verify on-disk persistence across fresh store reload
+    reloaded_store = SessionStore(storage_path=store_file)
+    assert reloaded_store.get_session("aaa/oracle") is not None
+    assert reloaded_store.get_session("aaa/oracle").username == "admin1"
+    assert "aaa" in reloaded_store.get_folders()
+
+    # Move back to root
+    reloaded_store.move_session("aaa/oracle", "")
+    assert reloaded_store.get_session("oracle") is not None
+    assert reloaded_store.get_session("oracle").folder == ""
+    assert reloaded_store.get_session("aaa/oracle", exact_path=True) is None
+
+
+def test_folder_crud_and_empty_folder_persistence(tmp_path: Path):
+    """Verifies adding, renaming, and persisting empty folders."""
+    store_file = tmp_path / "sessions.ini"
+    store = SessionStore(storage_path=store_file)
+
+    # Add empty folder
+    assert store.add_folder("aaa") is True
+    assert "aaa" in store.get_folders()
+
+    # Persist and reload
+    store.save_local()
+    reloaded = SessionStore(storage_path=store_file)
+    assert "aaa" in reloaded.get_folders()
+
+    # Rename folder
+    assert reloaded.rename_folder("aaa", "bbb") is True
+    assert "bbb" in reloaded.get_folders()
+    assert "aaa" not in reloaded.get_folders()
+
+    # Delete folder
+    assert reloaded.delete_folder("bbb") is True
+    assert "bbb" not in reloaded.get_folders()
