@@ -14,6 +14,11 @@ WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live re
 - **Navigation Controls:** Editable path bars with instant "Go" and parent directory (`..`) navigation.
 - **Comprehensive Toolbar:** Quick actions for Connect, Disconnect, Refresh, Upload, Download, Edit, Chmod, Delete, New Folder, Terminal, and Cloud Backup.
 - **Interactive Permissions Editor (`chmod`):** Visual 3x3 permission grid (Read, Write, Execute for Owner, Group, Others) with bidirectional octal calculator.
+- **Bidirectional Drag & Drop:**
+  - Drag files or entire folders from the **Local pane (Left)** and drop onto the **Remote pane (Right)** to initiate background SFTP upload.
+  - Drag files or entire folders from the **Remote pane (Right)** and drop onto the **Local pane (Left)** to initiate background download.
+  - Drop onto specific subfolders in either pane to upload or download directly into that subfolder.
+  - Drag and drop files directly from your Linux desktop file managers (Nautilus, Dolphin, Thunar, etc.) onto either pane.
 - **Context Menus & Hotkeys:** Right-click context menus on both panes and standard function keys (`F4` Edit, `F5` Transfer, `F7` New Folder, `F8` Delete, `F9` Permissions).
 
 ### 2. Live Remote Direct-Edit & Auto-Sync
