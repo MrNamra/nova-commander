@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -153,7 +154,10 @@ class SyncEngine(QObject):
         """Launches default editor via xdg-open or specified command."""
         cmd = []
         if editor_command and editor_command.strip():
-            cmd = editor_command.strip().split() + [local_path]
+            try:
+                cmd = shlex.split(editor_command.strip()) + [local_path]
+            except Exception:
+                cmd = editor_command.strip().split() + [local_path]
         elif os.environ.get("EDITOR"):
             cmd = [os.environ["EDITOR"], local_path]
         elif shutil.which("xdg-open"):

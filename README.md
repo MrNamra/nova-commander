@@ -2,7 +2,7 @@
 
 A full-featured, native Linux desktop alternative to WinSCP designed for high-productivity SFTP and SSH workflows.
 
-WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live remote file direct-editing with automatic inotify sync, embeds an interactive Linux terminal, and provides AES-256-GCM encrypted `.ini` session export/import with 7-day cloud sharing.
+WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live remote file direct-editing with automatic inotify sync, embeds an interactive Linux terminal, provides an intelligent "Open With" application selector with configurable defaults, and delivers AES-256-GCM encrypted `.ini` session export/import with 7-day cloud sharing.
 
 ---
 
@@ -20,7 +20,7 @@ WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live re
 - **Dual Filesystem Navigation:** Local Linux filesystem on the left and remote SFTP server on the right.
 - **Classic Commander Layout:** Columns for Name, Size, Permissions (`0755` / `rwxr-xr-x`), and Last Modified date.
 - **Navigation Controls:** Editable path bars with instant "Go" and parent directory (`..`) navigation.
-- **Comprehensive Toolbar:** Quick actions for Connect, Disconnect, Refresh, Upload, Download, Edit, Chmod, Delete, New Folder, Terminal, and Cloud Backup.
+- **Comprehensive Toolbar:** Quick actions for Connect, Disconnect, Refresh, Upload, Download, Edit, Open With, Chmod, Delete, New Folder, Terminal, and Cloud Backup.
 - **Interactive Permissions Editor (`chmod`):** Visual 3x3 permission grid (Read, Write, Execute for Owner, Group, Others) with bidirectional octal calculator.
 - **Bidirectional Drag & Drop:**
   - Drag files or entire folders from the **Local pane (Left)** and drop onto the **Remote pane (Right)** to initiate background SFTP upload.
@@ -29,21 +29,30 @@ WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live re
   - Drag and drop files directly from your Linux desktop file managers (Nautilus, Dolphin, Thunar, etc.) onto either pane.
 - **Context Menus & Hotkeys:** Right-click context menus on both panes and standard function keys (`F4` Edit, `F5` Transfer, `F7` New Folder, `F8` Delete, `F9` Permissions).
 
-### 2. Live Remote Direct-Edit & Auto-Sync
-- **Seamless Workflow:** Double-click or right-click any remote file and select **Edit (F4)**.
+### 3. Open With & Configurable Default Applications
+- **Application Prompt on Open:** When opening or editing any file (remote or local), WinSCP-Linux asks which application you want to open it with unless a default is configured.
+- **Auto-Detection of Linux Editors:** Scans the operating system and automatically lists installed text editors and IDEs (Visual Studio Code, GEdit, Kate, Sublime Text, Geany, Mousepad, Pluma, Nano, Vim, and System Default `xdg-open`).
+- **Custom Application / Executable Browser:** Enter custom command strings with arguments or browse for binaries on the Linux filesystem (`/usr/bin`, `~/.local/bin`, etc.).
+- **Per-Extension Associations:** Check *"Always use this application for \*.ext files"* to associate specific file types (e.g. `.py` with VS Code, `.txt` with GEdit).
+- **Global Default Application:** Option to set an application as the global default for all files.
+- **"Always Ask" Preference:** Toggle *"Always ask before opening files"* at any time.
+- **Dedicated Preferences Dialog:** Manage, add, or delete extension associations and default editors anytime via **Commands -> Configure Default Applications...**.
+
+### 4. Live Remote Direct-Edit & Auto-Sync
+- **Seamless Workflow:** Double-click or right-click any remote file and select **Edit (F4)** or **Open With...**.
 - **Cache Management:** Automatically downloads the file to `/tmp/winscp-linux-cache/<session_id>/<remote_path>`.
 - **System Editor Launch:** Launches your preferred Linux editor or IDE (`xdg-open`, `$EDITOR`, VS Code, GEdit, Kate, Nano, etc.).
 - **Inotify File Watching:** Hooks Linux kernel `inotify` events via `watchdog` to monitor the cached file.
 - **Instant Auto-Upload:** Whenever you save (`Ctrl+S`) in your editor, WinSCP-Linux debounces the event and automatically uploads the updated file back to the remote server via SFTP.
 - **Status Feedback & Cleanup:** Visual status bar notifications for transfer progress and automated cache cleanup on session disconnect or application exit.
 
-### 3. Embedded Linux Terminal
+### 5. Embedded Linux Terminal
 - **Zero External Dependencies:** Built-in terminal directly in the bottom dock panel without launching external terminal emulators like xterm.
 - **Live SSH Multiplexing:** Multiplexes the existing SSH connection credentials into an interactive pseudo-terminal (`pty`).
 - **VT100 / ANSI Emulation:** Powered by `pyte` virtual terminal screen buffer and PyQt6 `QPainter` rendering with an authentic 16-color dark palette and blinking cursor.
 - **Full Shell Interactivity:** Supports arrow keys, Enter, Backspace, Tab completion, Ctrl combinations (Ctrl+C, Ctrl+D, Ctrl+Z, etc.), screen clearing, copy-paste, and dynamic window resizing (`resize_pty`).
 
-### 4. Encrypted .ini Export & Selective Cloud Sharing
+### 6. Encrypted .ini Export & Selective Cloud Sharing
 - **Selective Session Export:** Check off specific servers or select all saved sessions to export.
 - **Strict WinSCP Compatibility:** Generates standard WinSCP `.ini` configuration sections:
   ```ini
@@ -68,21 +77,36 @@ WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live re
 
 ---
 
+## 🛠 Technology Stack
+
+- **Python:** 3.10+
+- **GUI Toolkit:** PyQt6
+- **SSH/SFTP Protocol:** `paramiko`
+- **Inotify File Watcher:** `watchdog`
+- **Cryptography:** `cryptography` (AES-256-GCM, PBKDF2HMAC SHA-256)
+- **HTTP Client:** `httpx`
+- **Terminal Emulation:** `pyte`
+- **Testing:** `pytest`
+
+---
+
 ## 📁 Project Directory Structure
 
 ```
 winscp_linux/
 ├── src/
 │   ├── ui/
-│   │   ├── main_window.py          # Dual-pane UI and toolbar
+│   │   ├── main_window.py          # Dual-pane UI, multi-session tabs, and toolbar
 │   │   ├── session_dialog.py       # Login and saved session manager
-│   │   ├── terminal_widget.py      # Embedded SSH terminal
+│   │   ├── terminal_widget.py      # Embedded SSH terminal (pyte + QPainter)
 │   │   └── export_dialog.py        # Selective session export & cloud dialog
+│   │   └── open_with_dialog.py     # Open With selector & Editor Preferences dialog
 │   ├── core/
 │   │   ├── sftp_client.py          # Paramiko SFTP operations & QThread workers
 │   │   ├── ssh_client.py           # Interactive SSH shell handler
 │   │   ├── sync_engine.py          # Watchdog file watcher and auto-sync
-│   │   └── session_store.py        # Local storage & WinSCP .ini parser
+│   │   ├── session_store.py        # Local storage & WinSCP .ini parser
+│   │   └── editor_manager.py       # Editor auto-detection & associations manager
 │   ├── crypto/
 │   │   └── ini_cipher.py           # AES-256-GCM encryption & decryption
 │   ├── cloud/
@@ -93,6 +117,9 @@ winscp_linux/
 │   ├── test_ini_parser.py          # Tests for WinSCP .ini read/write
 │   ├── test_cloud_client.py        # Tests for cloud client operations
 │   ├── test_sync_engine.py         # Tests for cache and sync paths
+│   ├── test_drag_and_drop.py       # Tests for bidirectional drag and drop
+│   ├── test_multi_session.py       # Tests for multi-session tab lifecycle
+│   ├── test_editor_manager.py      # Tests for Open With & default editor settings
 │   └── test_ui_smoke.py            # Tests for Qt UI dialog initialization
 ├── requirements.txt
 └── README.md
@@ -100,12 +127,46 @@ winscp_linux/
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Installation & Getting Started
 
+### 1. Prerequisites
+Ensure Python 3.10+ is installed on your Linux system:
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Run application
-python3 main.py
+python3 --version
 ```
+
+### 2. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+*(Or use `pip install -r winscp_linux/requirements.txt` from repository root)*
+
+### 3. Launch WinSCP-Linux
+Run either from root or from the package:
+```bash
+# From repository root:
+python3 main.py
+
+# Or directly:
+python3 winscp_linux/src/main.py
+```
+
+---
+
+## 🧪 Running the Test Suite
+
+The test suite validates cryptographic integrity (tamper detection, round-trip encryption, wrong password rejection), WinSCP INI parser conformity, cloud client synchronization, file cache paths, drag-and-drop operations, multi-session tabs, application selector preferences, and UI widget initialization.
+
+Run pytest in headless mode:
+```bash
+cd winscp_linux
+QT_QPA_PLATFORM=offscreen PYTHONPATH=src pytest -v
+```
+
+---
+
+## 🔒 Security Specifications
+
+- **Key Derivation Function:** `PBKDF2HMAC` (SHA-256, 16-byte random salt, 600,000 iterations).
+- **Authentication Mode:** Galois/Counter Mode (GCM) provides confidentiality and cryptographic integrity verification; any alteration to ciphertext or tag results in instant authentication rejection.
+- **Credential Storage:** Plain passwords are never stored in unencrypted exports; private keys can be referenced from standard OpenSSH paths (`~/.ssh/id_*`, `.pem`).

@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -73,9 +75,11 @@ from ..core.sftp_client import (
     SFTPListDirWorker,
     SFTPUploadWorker,
 )
+from ..core.editor_manager import editor_preferences
 from ..core.ssh_client import SSHShellClient
 from ..core.sync_engine import SyncEngine
 from .export_dialog import ExportDialog
+from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog
 from .session_dialog import SessionDialog
 from .terminal_widget import TerminalWidget
 
@@ -658,8 +662,52 @@ class SessionCommanderView(QWidget):
         if data and data.get("is_dir"):
             self._load_local_directory(data["path"])
         else:
-            if self.sftp_client.is_connected:
-                self.upload_selected()
+            self.open_selected_local_file()
+
+    def open_selected_local_file(self, force_open_with: bool = False):
+        selected = self.table_local.selectedItems()
+        if not selected:
+            QMessageBox.information(self, "No File Selected", "Please select a local file to open.")
+            return
+
+        row = selected[0].row()
+        item = self.table_local.item(row, 0)
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data or data.get("is_dir") or data.get("name") == "..":
+            return
+
+        local_path = data["path"]
+
+        chosen_editor = None
+        if not force_open_with:
+            chosen_editor = editor_preferences.get_editor_for_file(local_path)
+
+        if not chosen_editor:
+            dlg = OpenWithDialog(local_path, pref_manager=editor_preferences, parent=self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            chosen_editor = dlg.get_selected_command()
+
+        self.status_message.emit(f"Opening local file: {local_path}...")
+        try:
+            cmd = []
+            if chosen_editor and chosen_editor.strip():
+                try:
+                    cmd = shlex.split(chosen_editor.strip()) + [local_path]
+                except Exception:
+                    cmd = chosen_editor.strip().split() + [local_path]
+            elif shutil.which("xdg-open"):
+                cmd = ["xdg-open", local_path]
+            else:
+                cmd = ["xdg-open", local_path]
+
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.status_message.emit(f"Opened {Path(local_path).name} with '{chosen_editor}'.")
+        except Exception as exc:
+            try:
+                subprocess.Popen(["xdg-open", local_path])
+            except Exception as e:
+                QMessageBox.critical(self, "Open Failed", f"Could not open local file: {exc} / {e}")
 
     # ----------------- Remote Pane -----------------
     def _load_remote_directory(self, dir_path: str):
@@ -731,7 +779,7 @@ class SessionCommanderView(QWidget):
             self.edit_selected_remote_file()
 
     # ----------------- Remote Direct Edit -----------------
-    def edit_selected_remote_file(self):
+    def edit_selected_remote_file(self, force_open_with: bool = False):
         if not self.sftp_client.is_connected:
             QMessageBox.warning(self, "Not Connected", "Please connect to a remote server first.")
             return
@@ -744,10 +792,22 @@ class SessionCommanderView(QWidget):
         row = selected[0].row()
         item = self.table_remote.item(row, 0)
         data = item.data(Qt.ItemDataRole.UserRole)
-        if not data or data.get("is_dir"):
+        if not data or data.get("is_dir") or data.get("name") == "..":
             return
 
         remote_path = data["path"]
+
+        # Check editor preference or prompt user
+        chosen_editor = None
+        if not force_open_with:
+            chosen_editor = editor_preferences.get_editor_for_file(remote_path)
+
+        if not chosen_editor:
+            dlg = OpenWithDialog(remote_path, pref_manager=editor_preferences, parent=self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            chosen_editor = dlg.get_selected_command()
+
         self.status_message.emit(f"Opening remote file for editing: {remote_path}...")
 
         try:
@@ -755,8 +815,9 @@ class SessionCommanderView(QWidget):
                 sftp_client=self.sftp_client,
                 session_id=self.session_id,
                 remote_path=remote_path,
+                editor_command=chosen_editor,
             )
-            self.status_message.emit(f"Opened {remote_path} in local editor. Auto-sync active.")
+            self.status_message.emit(f"Opened {remote_path} with '{chosen_editor}'. Auto-sync active.")
         except Exception as exc:
             QMessageBox.critical(self, "Edit Failed", f"Could not open file for editing: {exc}")
 
@@ -1161,6 +1222,11 @@ class SessionCommanderView(QWidget):
 
     def _show_local_context_menu(self, pos: QPoint):
         menu = QMenu(self)
+        act_open = menu.addAction("✏ Open / Edit (F4)")
+        act_open.triggered.connect(lambda: self.open_selected_local_file(force_open_with=False))
+        act_open_with = menu.addAction("📂 Open With...")
+        act_open_with.triggered.connect(lambda: self.open_selected_local_file(force_open_with=True))
+        menu.addSeparator()
         if self.sftp_client.is_connected:
             act_up = menu.addAction("⬆ Upload to Remote (F5)")
             act_up.triggered.connect(self.upload_selected)
@@ -1176,7 +1242,9 @@ class SessionCommanderView(QWidget):
     def _show_remote_context_menu(self, pos: QPoint):
         menu = QMenu(self)
         act_edit = menu.addAction("✏ Edit & Auto-Sync (F4)")
-        act_edit.triggered.connect(self.edit_selected_remote_file)
+        act_edit.triggered.connect(lambda: self.edit_selected_remote_file(force_open_with=False))
+        act_open_with = menu.addAction("📂 Open With...")
+        act_open_with.triggered.connect(lambda: self.edit_selected_remote_file(force_open_with=True))
 
         act_down = menu.addAction("⬇ Download to Local (F5)")
         act_down.triggered.connect(self.download_selected)
@@ -1282,9 +1350,12 @@ class MainWindow(QMainWindow):
         act_download = m_cmd.addAction("Download (F5)")
         act_download.triggered.connect(self.download_selected)
 
-        act_edit = m_cmd.addAction("Edit Remote File (F4)")
+        act_edit = m_cmd.addAction("Edit / Open (F4)")
         act_edit.setShortcut("F4")
         act_edit.triggered.connect(self.edit_selected_remote_file)
+
+        act_open_with = m_cmd.addAction("Open With...")
+        act_open_with.triggered.connect(self.open_with_selected)
 
         act_del = m_cmd.addAction("Delete (F8)")
         act_del.setShortcut("F8")
@@ -1297,6 +1368,10 @@ class MainWindow(QMainWindow):
         act_chmod = m_cmd.addAction("Properties / Chmod (F9)")
         act_chmod.setShortcut("F9")
         act_chmod.triggered.connect(self.chmod_selected)
+
+        m_cmd.addSeparator()
+        act_pref_editor = m_cmd.addAction("Configure Default Applications...")
+        act_pref_editor.triggered.connect(self.configure_default_applications)
 
         m_cmd.addSeparator()
         act_term = m_cmd.addAction("Open Terminal (Ctrl+T)")
@@ -1342,6 +1417,9 @@ class MainWindow(QMainWindow):
 
         self.tb_edit = toolbar.addAction("✏ Edit")
         self.tb_edit.triggered.connect(self.edit_selected_remote_file)
+
+        self.tb_open_with = toolbar.addAction("📂 Open With")
+        self.tb_open_with.triggered.connect(self.open_with_selected)
 
         self.tb_chmod = toolbar.addAction("🔒 Chmod")
         self.tb_chmod.triggered.connect(self.chmod_selected)
@@ -1533,9 +1611,26 @@ class MainWindow(QMainWindow):
         if view := self.active_session_view():
             view.download_selected()
 
-    def edit_selected_remote_file(self):
+    def edit_selected_remote_file(self, force_open_with: bool = False):
         if view := self.active_session_view():
-            view.edit_selected_remote_file()
+            view.edit_selected_remote_file(force_open_with=force_open_with)
+
+    def open_selected_local_file(self, force_open_with: bool = False):
+        if view := self.active_session_view():
+            view.open_selected_local_file(force_open_with=force_open_with)
+
+    def open_with_selected(self):
+        """Opens the selected file (local or remote) prompting for application selection."""
+        if view := self.active_session_view():
+            if view.table_local.hasFocus():
+                view.open_selected_local_file(force_open_with=True)
+            else:
+                view.edit_selected_remote_file(force_open_with=True)
+
+    def configure_default_applications(self):
+        """Opens the Application Preferences Dialog to configure default editors."""
+        dlg = EditorPreferencesDialog(editor_preferences, self)
+        dlg.exec()
 
     def chmod_selected(self):
         if view := self.active_session_view():
