@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -28,6 +29,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -234,6 +236,142 @@ class OpenWithDialog(QDialog):
     def get_selected_command(self) -> str:
         """Returns the chosen editor command."""
         return self._selected_command
+
+
+class SimpleOpenPromptDialog(QDialog):
+    """
+    Simplified File Open Dialog giving 2 options only:
+    1. Default Application (e.g. Default: Visual Studio Code)
+    2. Other Application... (Opens system software manager where user selects which software to open)
+    Includes option to persist default choice for file extension.
+    """
+
+    def __init__(
+        self,
+        filename_or_path: str,
+        pref_manager: Optional[EditorPreferencesManager] = None,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.filename = Path(filename_or_path).name
+        self.extension = Path(filename_or_path).suffix.lower()
+        self.prefs = pref_manager or editor_preferences
+
+        self.setWindowTitle(f"Open File - {self.filename}")
+        self.resize(480, 270)
+
+        # Determine default application
+        self._default_cmd = self.prefs.get_configured_editor(self.filename)
+        if not self._default_cmd:
+            installed = self.prefs.get_installed_editors()
+            if installed:
+                self._default_cmd = installed[0].command
+                self._default_name = installed[0].name
+            else:
+                self._default_cmd = "xdg-open"
+                self._default_name = "System Default Application"
+        else:
+            self._default_name = self._resolve_name(self._default_cmd)
+
+        self._selected_command: str = self._default_cmd
+        self._set_as_default: bool = False
+        self._setup_ui()
+
+    def _resolve_name(self, cmd: str) -> str:
+        for ed in self.prefs.get_installed_editors():
+            if ed.command == cmd:
+                return f"{ed.name} ({ed.command})"
+        base = Path(cmd.split()[0]).name
+        return f"{base} ({cmd})"
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        lbl_desc = QLabel(f"How would you like to open <b>{self.filename}</b>?")
+        lbl_desc.setStyleSheet("font-size: 13px; color: #ffffff;")
+        lbl_desc.setWordWrap(True)
+        layout.addWidget(lbl_desc)
+
+        # Options group (2 options only)
+        grp_options = QGroupBox("Select Option")
+        opt_layout = QVBoxLayout(grp_options)
+        opt_layout.setSpacing(10)
+
+        self.btn_group = QButtonGroup(self)
+
+        # Option 1: Default Application
+        self.rb_default = QRadioButton(f"1. Default Application ({self._default_name})")
+        self.rb_default.setChecked(True)
+        self.btn_group.addButton(self.rb_default)
+        opt_layout.addWidget(self.rb_default)
+
+        # Option 2: Other Application...
+        h_other = QHBoxLayout()
+        self.rb_other = QRadioButton("2. Other Application... (Select from system software list)")
+        self.btn_group.addButton(self.rb_other)
+        h_other.addWidget(self.rb_other)
+
+        self.btn_browse_other = QPushButton("Choose Software...")
+        self.btn_browse_other.setToolTip("Open system application selector to choose software")
+        self.btn_browse_other.clicked.connect(self._open_system_manager)
+        h_other.addWidget(self.btn_browse_other)
+        opt_layout.addLayout(h_other)
+
+        layout.addWidget(grp_options)
+
+        # Persistence option
+        ext_label = (
+            f"Always use this choice for *{self.extension} files"
+            if self.extension
+            else "Always use this choice for files without extension"
+        )
+        self.cb_set_default = QCheckBox(ext_label)
+        layout.addWidget(self.cb_set_default)
+
+        # Dialog buttons
+        btn_bar = QHBoxLayout()
+        btn_bar.addStretch()
+
+        self.btn_open = QPushButton("Open")
+        self.btn_open.setDefault(True)
+        self.btn_open.setStyleSheet("font-weight: bold; background-color: #238636; color: white; padding: 6px 16px;")
+        self.btn_cancel = QPushButton("Cancel")
+
+        btn_bar.addWidget(self.btn_open)
+        btn_bar.addWidget(self.btn_cancel)
+        layout.addLayout(btn_bar)
+
+        self.btn_open.clicked.connect(self._on_open_clicked)
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def _open_system_manager(self):
+        self.rb_other.setChecked(True)
+        dlg = OpenWithDialog(self.filename, pref_manager=self.prefs, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._selected_command = dlg.get_selected_command()
+            self._set_as_default = self.cb_set_default.isChecked() or dlg.cb_set_default_ext.isChecked() or dlg.cb_set_default_global.isChecked()
+            self.accept()
+
+    def _on_open_clicked(self):
+        if self.rb_other.isChecked():
+            self._open_system_manager()
+            return
+
+        self._selected_command = self._default_cmd
+        if self.cb_set_default.isChecked():
+            self.prefs.set_default_editor(
+                self._selected_command,
+                for_extension=self.extension or None,
+                always_ask=False,
+            )
+        self.accept()
+
+    def get_selected_command(self) -> str:
+        return self._selected_command
+
+    def should_set_default(self) -> bool:
+        return self._set_as_default
 
 
 class EditorPreferencesDialog(QDialog):

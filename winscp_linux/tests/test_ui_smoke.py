@@ -23,7 +23,7 @@ def test_main_window_instantiation(qapp, tmp_path):
     store = SessionStore(storage_path=store_file)
 
     win = MainWindow(store)
-    assert win.windowTitle() == "WinSCP-Linux"
+    assert win.windowTitle() == "Nova Commander"
     assert win.table_local.rowCount() >= 0
 
     # Chmod Dialog
@@ -41,7 +41,7 @@ def test_session_dialog_instantiation(qapp, tmp_path):
     store.save_session(SessionConfig(name="Web1", host="10.0.0.1", username="admin"))
 
     dlg = SessionDialog(store)
-    assert dlg.windowTitle().startswith("WinSCP-Linux")
+    assert dlg.windowTitle().startswith("Nova Commander")
     assert dlg.tree.topLevelItemCount() > 0
 
     km_dlg = KeyManagerDialog(dlg)

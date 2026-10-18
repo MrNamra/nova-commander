@@ -22,6 +22,7 @@ class SessionConfig:
     username: str = ""
     password: str = ""
     private_key: str = ""
+    passphrase: str = ""
     protocol: str = "SFTP"  # SFTP or SCP
     remote_dir: str = "/"
     local_dir: str = field(default_factory=lambda: os.path.expanduser("~"))
@@ -48,6 +49,7 @@ class SessionConfig:
             username=data.get("username", ""),
             password=data.get("password", ""),
             private_key=data.get("private_key", ""),
+            passphrase=data.get("passphrase", ""),
             protocol=data.get("protocol", "SFTP"),
             remote_dir=data.get("remote_dir", "/"),
             local_dir=data.get("local_dir", os.path.expanduser("~")),
@@ -190,6 +192,7 @@ class SessionStore:
             remote_dir = parser.get(section, "RemoteDirectory", fallback="/")
             local_dir = parser.get(section, "LocalDirectory", fallback=os.path.expanduser("~"))
             comment = parser.get(section, "Comment", fallback="")
+            passphrase = parser.get(section, "Passphrase", fallback="")
 
             cfg = SessionConfig(
                 name=name,
@@ -198,6 +201,7 @@ class SessionStore:
                 username=username,
                 password=password,
                 private_key=private_key,
+                passphrase=passphrase,
                 protocol=protocol,
                 remote_dir=remote_dir if remote_dir else "/",
                 local_dir=local_dir if local_dir else os.path.expanduser("~"),
@@ -238,6 +242,8 @@ class SessionStore:
                 lines.append(f"Password={s.password}")
             if s.private_key:
                 lines.append(f"PublicKeyFile={s.private_key}")
+            if s.passphrase:
+                lines.append(f"Passphrase={s.passphrase}")
             # WinSCP FSProtocol: 0 = SFTP, 1 = SCP
             fsprotocol = 1 if s.protocol.upper() == "SCP" else 0
             lines.append(f"FSProtocol={fsprotocol}")

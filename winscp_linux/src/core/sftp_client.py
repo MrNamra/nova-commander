@@ -126,17 +126,25 @@ class SFTPClient:
                 paramiko.ECDSAKey,
                 paramiko.DSSKey,
             ]
+            key_load_err = None
             for key_cls in key_classes:
                 try:
-                    pkey = key_cls.from_private_key_file(private_key_path, password=passphrase)
+                    pkey = key_cls.from_private_key_file(private_key_path, password=passphrase or None)
                     break
-                except Exception:
+                except (paramiko.PasswordRequiredException, paramiko.ssh_exception.PasswordRequiredException) as pe:
+                    key_load_err = pe
+                    break
+                except Exception as e:
+                    key_load_err = e
                     continue
+
+            if pkey is None and isinstance(key_load_err, (paramiko.PasswordRequiredException, paramiko.ssh_exception.PasswordRequiredException)):
+                raise ConnectionError("Private key is encrypted and requires a passphrase.") from key_load_err
 
             if pkey is None:
                 # Try OpenSSH format
                 try:
-                    pkey = paramiko.PKey.from_path(private_key_path)
+                    pkey = paramiko.PKey.from_path(private_key_path, password=passphrase or None)
                 except Exception:
                     pass
 
@@ -389,6 +397,21 @@ class SFTPClient:
             raise RuntimeError("SFTP client is not connected.")
         self._sftp.chmod(remote_path, mode)
 
+    def chmod_recursive(self, remote_path: str, mode: int) -> None:
+        """Recursively changes permissions of a remote directory and its contents."""
+        if not self.is_connected or not self._sftp:
+            raise RuntimeError("SFTP client is not connected.")
+        self._sftp.chmod(remote_path, mode)
+        try:
+            for item in self._sftp.listdir_attr(remote_path):
+                child_path = f"{remote_path.rstrip('/')}/{item.filename}"
+                if stat.S_ISDIR(item.st_mode):
+                    self.chmod_recursive(child_path, mode)
+                else:
+                    self._sftp.chmod(child_path, mode)
+        except Exception:
+            pass
+
     def stat(self, remote_path: str) -> paramiko.SFTPAttributes:
         if not self.is_connected or not self._sftp:
             raise RuntimeError("SFTP client is not connected.")
@@ -414,6 +437,7 @@ class SFTPConnectWorker(QThread):
         username: str = "",
         password: str = "",
         private_key: str = "",
+        passphrase: str = "",
         initial_remote_dir: str = "/",
     ):
         super().__init__()
@@ -423,6 +447,7 @@ class SFTPConnectWorker(QThread):
         self.username = username
         self.password = password
         self.private_key = private_key
+        self.passphrase = passphrase
         self.initial_remote_dir = initial_remote_dir
 
     def run(self):
@@ -433,6 +458,7 @@ class SFTPConnectWorker(QThread):
                 username=self.username,
                 password=self.password,
                 private_key_path=self.private_key,
+                passphrase=self.passphrase,
             )
             # Try setting initial directory if provided
             if self.initial_remote_dir and self.initial_remote_dir != "/":

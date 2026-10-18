@@ -20,6 +20,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .editor_manager import launch_external_editor
 from .sftp_client import SFTPClient
 
 
@@ -151,35 +152,11 @@ class SyncEngine(QObject):
         return local_cache_path
 
     def _launch_editor(self, local_path: str, editor_command: Optional[str] = None) -> None:
-        """Launches default editor via xdg-open or specified command."""
-        cmd = []
-        if editor_command and editor_command.strip():
-            try:
-                cmd = shlex.split(editor_command.strip()) + [local_path]
-            except Exception:
-                cmd = editor_command.strip().split() + [local_path]
-        elif os.environ.get("EDITOR"):
-            cmd = [os.environ["EDITOR"], local_path]
-        elif shutil.which("xdg-open"):
-            cmd = ["xdg-open", local_path]
-        elif shutil.which("gedit"):
-            cmd = ["gedit", local_path]
-        elif shutil.which("kate"):
-            cmd = ["kate", local_path]
-        elif shutil.which("nano"):
-            # If in terminal
-            cmd = ["x-terminal-emulator", "-e", "nano", local_path]
-        else:
-            cmd = ["xdg-open", local_path]
-
+        """Launches default editor via safe process detachment and clean environment."""
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            launch_external_editor(editor_command, local_path)
         except Exception as exc:
-            # Fallback to xdg-open
-            try:
-                subprocess.Popen(["xdg-open", local_path])
-            except Exception as e:
-                self.sync_failed.emit(local_path, f"Could not launch editor: {exc} / {e}")
+            self.sync_failed.emit(local_path, f"Could not launch editor: {exc}")
 
     def _handle_file_saved(self, sftp_client: SFTPClient, local_path: str) -> None:
         """Uploads modified file back to remote server via SFTP."""

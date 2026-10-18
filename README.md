@@ -1,8 +1,8 @@
-# WinSCP-Linux
+# Nova Commander
 
-A full-featured, native Linux desktop alternative to WinSCP designed for high-productivity SFTP and SSH workflows.
+A full-featured, professional native Linux desktop dual-pane commander designed for high-productivity SFTP and SSH workflows.
 
-WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live remote file direct-editing with automatic inotify sync, embeds an interactive Linux terminal, provides an intelligent "Open With" application selector with configurable defaults, and delivers AES-256-GCM encrypted `.ini` session export/import with 7-day cloud sharing.
+Nova Commander delivers a modern dual-pane commander interface, multi-session simultaneous connections, live remote file direct-editing with automatic inotify sync, an embedded interactive Linux terminal (with Ctrl+P new-window support), recursive permissions management, an intelligent "Open With" application selector with configurable defaults, and AES-256-GCM encrypted WinSCP-compatible `.ini` session backup and import.
 
 ---
 

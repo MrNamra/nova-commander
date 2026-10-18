@@ -46,6 +46,7 @@ class SSHShellClient(QObject):
         username: str = "",
         password: str = "",
         private_key: str = "",
+        passphrase: str = "",
         cols: int = 80,
         rows: int = 24,
     ) -> None:
@@ -65,10 +66,15 @@ class SSHShellClient(QObject):
 
             pkey = None
             if private_key:
-                for kcls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
+                for kcls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey):
                     try:
-                        pkey = kcls.from_private_key_file(private_key)
+                        pkey = kcls.from_private_key_file(private_key, password=passphrase or None)
                         break
+                    except Exception:
+                        pass
+                if pkey is None:
+                    try:
+                        pkey = paramiko.PKey.from_path(private_key, password=passphrase or None)
                     except Exception:
                         pass
 

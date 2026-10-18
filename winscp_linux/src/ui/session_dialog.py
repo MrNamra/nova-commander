@@ -124,7 +124,7 @@ class SessionDialog(QDialog):
     def __init__(self, session_store: SessionStore, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.session_store = session_store
-        self.setWindowTitle("WinSCP-Linux - Login & Saved Sessions")
+        self.setWindowTitle("Nova Commander - Login & Saved Sessions")
         self.resize(760, 520)
 
         self._active_config: Optional[SessionConfig] = None
@@ -219,6 +219,19 @@ class SessionDialog(QDialog):
         key_layout.addWidget(self.btn_browse_key)
         form.addRow("Private Key:", key_layout)
 
+        # Key Passphrase
+        passphrase_layout = QHBoxLayout()
+        self.txt_passphrase = QLineEdit()
+        self.txt_passphrase.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_passphrase.setPlaceholderText("Passphrase (if key is encrypted)")
+        self.btn_toggle_passphrase = QPushButton("👁")
+        self.btn_toggle_passphrase.setFixedWidth(32)
+        self.btn_toggle_passphrase.setCheckable(True)
+        self.btn_toggle_passphrase.clicked.connect(self._toggle_passphrase_visibility)
+        passphrase_layout.addWidget(self.txt_passphrase)
+        passphrase_layout.addWidget(self.btn_toggle_passphrase)
+        form.addRow("Key Passphrase:", passphrase_layout)
+
         # Directory settings
         self.txt_remote_dir = QLineEdit("/")
         form.addRow("Remote Dir:", self.txt_remote_dir)
@@ -240,7 +253,7 @@ class SessionDialog(QDialog):
         # ----------------- Bottom Action Bar -----------------
         bottom_layout = QHBoxLayout()
 
-        self.btn_cloud = QPushButton("☁ Export / Cloud Backup")
+        self.btn_cloud = QPushButton("📁 Export / Import Sessions")
         self.btn_manage_keys = QPushButton("🔑 Manage Keys")
         self.btn_save = QPushButton("💾 Save Session")
         self.btn_login = QPushButton("🚀 Login")
@@ -317,6 +330,7 @@ class SessionDialog(QDialog):
         self.txt_user.setText(s.username)
         self.txt_password.setText(s.password)
         self.txt_key_path.setText(s.private_key)
+        self.txt_passphrase.setText(getattr(s, "passphrase", ""))
         self.cmb_protocol.setCurrentText(s.protocol)
         self.txt_remote_dir.setText(s.remote_dir or "/")
         self.txt_local_dir.setText(s.local_dir or str(Path.home()))
@@ -328,6 +342,7 @@ class SessionDialog(QDialog):
         self.txt_user.clear()
         self.txt_password.clear()
         self.txt_key_path.clear()
+        self.txt_passphrase.clear()
         self.spin_port.setValue(22)
         self.cmb_protocol.setCurrentText("SFTP")
         self.txt_remote_dir.setText("/")
@@ -374,6 +389,14 @@ class SessionDialog(QDialog):
             self.txt_password.setEchoMode(QLineEdit.EchoMode.Password)
             self.btn_toggle_pwd.setText("👁")
 
+    def _toggle_passphrase_visibility(self, checked: bool):
+        if checked:
+            self.txt_passphrase.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.btn_toggle_passphrase.setText("🔒")
+        else:
+            self.txt_passphrase.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_toggle_passphrase.setText("👁")
+
     def _browse_key_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -399,6 +422,7 @@ class SessionDialog(QDialog):
             username=self.txt_user.text().strip(),
             password=self.txt_password.text(),
             private_key=self.txt_key_path.text().strip(),
+            passphrase=self.txt_passphrase.text(),
             protocol=self.cmb_protocol.currentText(),
             remote_dir=self.txt_remote_dir.text().strip() or "/",
             local_dir=self.txt_local_dir.text().strip() or str(Path.home()),

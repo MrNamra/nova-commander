@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -25,18 +28,52 @@ class EditorInfo:
     is_installed: bool = False
 
 
-KNOWN_EDITORS = [
-    {"id": "xdg-open", "name": "System Default Application", "command": "xdg-open", "desc": "Linux desktop default handler"},
-    {"id": "code", "name": "Visual Studio Code", "command": "code", "desc": "Microsoft VS Code IDE"},
-    {"id": "gedit", "name": "GNOME Text Editor (gedit)", "command": "gedit", "desc": "Standard GNOME text editor"},
-    {"id": "kate", "name": "Kate Advanced Editor", "command": "kate", "desc": "KDE multi-document text editor"},
-    {"id": "subl", "name": "Sublime Text", "command": "subl", "desc": "Sublime Text editor"},
-    {"id": "geany", "name": "Geany IDE", "command": "geany", "desc": "Fast and lightweight IDE"},
-    {"id": "mousepad", "name": "Mousepad", "command": "mousepad", "desc": "XFCE simple text editor"},
-    {"id": "pluma", "name": "Pluma", "command": "pluma", "desc": "MATE desktop text editor"},
-    {"id": "nano", "name": "GNU nano", "command": "x-terminal-emulator -e nano", "desc": "Terminal text editor in emulator"},
-    {"id": "vim", "name": "Vim", "command": "x-terminal-emulator -e vim", "desc": "Vi IMproved in terminal emulator"},
-]
+def get_default_system_opener() -> str:
+    """Returns standard system default opener for current platform."""
+    if sys.platform == "darwin":
+        return "open"
+    elif sys.platform == "win32":
+        return "start"
+    else:
+        return "xdg-open"
+
+
+def get_known_editors() -> List[dict]:
+    """Returns platform-specific known editor application definitions."""
+    if sys.platform == "darwin":
+        return [
+            {"id": "open", "name": "System Default Application", "command": "open", "desc": "macOS default file handler"},
+            {"id": "code", "name": "Visual Studio Code", "command": "code", "desc": "Microsoft VS Code IDE"},
+            {"id": "textedit", "name": "TextEdit", "command": "open -a TextEdit", "desc": "Apple TextEdit editor"},
+            {"id": "subl", "name": "Sublime Text", "command": "subl", "desc": "Sublime Text editor"},
+            {"id": "bbedit", "name": "BBEdit", "command": "bbedit", "desc": "BBEdit text editor"},
+            {"id": "nano", "name": "GNU nano", "command": "nano", "desc": "Terminal text editor"},
+            {"id": "vim", "name": "Vim", "command": "vim", "desc": "Vi IMproved editor"},
+        ]
+    elif sys.platform == "win32":
+        return [
+            {"id": "start", "name": "System Default Application", "command": "start", "desc": "Windows default file handler"},
+            {"id": "notepad", "name": "Notepad", "command": "notepad", "desc": "Windows standard Notepad"},
+            {"id": "code", "name": "Visual Studio Code", "command": "code", "desc": "Microsoft VS Code IDE"},
+            {"id": "notepad++", "name": "Notepad++", "command": "notepad++", "desc": "Notepad++ source code editor"},
+            {"id": "subl", "name": "Sublime Text", "command": "subl", "desc": "Sublime Text editor"},
+        ]
+    else:
+        return [
+            {"id": "xdg-open", "name": "System Default Application", "command": "xdg-open", "desc": "Linux desktop default handler"},
+            {"id": "code", "name": "Visual Studio Code", "command": "code", "desc": "Microsoft VS Code IDE"},
+            {"id": "gedit", "name": "GNOME Text Editor (gedit)", "command": "gedit", "desc": "Standard GNOME text editor"},
+            {"id": "kate", "name": "Kate Advanced Editor", "command": "kate", "desc": "KDE multi-document text editor"},
+            {"id": "subl", "name": "Sublime Text", "command": "subl", "desc": "Sublime Text editor"},
+            {"id": "geany", "name": "Geany IDE", "command": "geany", "desc": "Fast and lightweight IDE"},
+            {"id": "mousepad", "name": "Mousepad", "command": "mousepad", "desc": "XFCE simple text editor"},
+            {"id": "pluma", "name": "Pluma", "command": "pluma", "desc": "MATE desktop text editor"},
+            {"id": "nano", "name": "GNU nano", "command": "x-terminal-emulator -e nano", "desc": "Terminal text editor in emulator"},
+            {"id": "vim", "name": "Vim", "command": "x-terminal-emulator -e vim", "desc": "Vi IMproved in terminal emulator"},
+        ]
+
+
+KNOWN_EDITORS = get_known_editors()
 
 
 class EditorPreferencesManager:
@@ -217,3 +254,84 @@ class EditorPreferencesManager:
 
 # Global singleton instance
 editor_preferences = EditorPreferencesManager()
+
+
+def get_clean_editor_env() -> dict:
+    """
+    Returns a sanitized copy of os.environ without internal winscp LD_LIBRARY_PATH
+    pollution, preventing crashes when launching external editors like VS Code.
+    """
+    clean_env = os.environ.copy()
+    if "LD_LIBRARY_PATH" in clean_env:
+        paths = [
+            p for p in clean_env["LD_LIBRARY_PATH"].split(":")
+            if p and "winscp" not in p.lower() and not p.endswith("/lib")
+        ]
+        if paths:
+            clean_env["LD_LIBRARY_PATH"] = ":".join(paths)
+        else:
+            clean_env.pop("LD_LIBRARY_PATH", None)
+
+    clean_env.pop("_WINSCP_XCB_LOADED", None)
+    return clean_env
+
+
+def launch_external_editor(editor_command: Optional[str], file_path: str) -> None:
+    """
+    Safely launches an external editor on file_path across Linux, macOS, and Windows.
+    Detaches the process into a new session, sets stdin to DEVNULL,
+    and removes library path pollution so applications like VS Code / Electron run reliably.
+    """
+    cmd_str = (editor_command or "").strip()
+
+    # Windows native default opener
+    if sys.platform == "win32" and (not cmd_str or cmd_str.lower() in ("start", "default", "os.startfile")):
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(file_path)
+                return
+        except Exception:
+            pass
+
+    clean_env = get_clean_editor_env()
+    cmd: List[str] = []
+
+    if cmd_str:
+        try:
+            cmd = shlex.split(cmd_str) + [file_path]
+        except Exception:
+            cmd = cmd_str.split() + [file_path]
+    elif os.environ.get("EDITOR"):
+        cmd = [os.environ["EDITOR"], file_path]
+    else:
+        opener = get_default_system_opener()
+        cmd = [opener, file_path]
+
+    # Special handling for macOS 'open'
+    if sys.platform == "darwin" and cmd and cmd[0] == "open" and "-a" not in cmd and len(cmd) == 2:
+        cmd = ["open", file_path]
+
+    kwargs = {
+        "env": clean_env,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(cmd, **kwargs)
+    except Exception as exc:
+        # Fallback to system default opener
+        opener = get_default_system_opener()
+        try:
+            if sys.platform == "win32" and hasattr(os, "startfile"):
+                os.startfile(file_path)
+            else:
+                fallback_kwargs = kwargs.copy()
+                subprocess.Popen([opener, file_path], **fallback_kwargs)
+        except Exception as e:
+            raise RuntimeError(f"Could not launch editor '{cmd}': {exc} / {e}")

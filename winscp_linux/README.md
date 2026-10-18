@@ -1,8 +1,8 @@
-# WinSCP-Linux
+# Nova Commander
 
-A full-featured, native Linux desktop alternative to WinSCP designed for high-productivity SFTP and SSH workflows.
+A full-featured, professional native Linux desktop dual-pane commander designed for high-productivity SFTP and SSH workflows.
 
-WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live remote file direct-editing with automatic inotify sync, embeds an interactive Linux terminal, provides an intelligent "Open With" application selector with configurable defaults, and delivers AES-256-GCM encrypted `.ini` session export/import with 7-day cloud sharing.
+Nova Commander delivers a modern dual-pane commander interface, multi-session simultaneous connections, live remote file direct-editing with automatic inotify sync, an embedded interactive Linux terminal (with Ctrl+P new-window support), recursive permissions management, an intelligent "Open With" application selector with configurable defaults, and AES-256-GCM encrypted WinSCP-compatible `.ini` session backup and import.
 
 ---
 
@@ -181,6 +181,24 @@ To build or rebuild the `.deb` package at any time:
 Outputs:
 - `dist/winscp-linux_1.0.0_amd64.deb`
 - `winscp-linux_1.0.0_amd64.deb` (root directory)
+
+---
+
+## 🍏 Cross-Platform: macOS & Windows Support
+
+WinSCP-Linux is built with cross-platform frameworks (**Python 3.10+**, **PyQt6**, **Paramiko**, **Watchdog**, and **Cryptography**), and can be compiled and run on **macOS** and **Windows**:
+
+### macOS
+- **Native Bundle & Disk Image:** Creates `WinSCP-Linux.app` and `WinSCP-Linux-1.0.0.dmg`.
+- **System Integration:** Uses native `open` file opener, Retina High-DPI support, and macOS Menlo monospace font.
+- **Build Command:** `./scripts/build_macos.sh`
+
+### Windows
+- **Standalone Executable & Installer:** Creates `WinSCP.exe` and `WinSCP-Setup-1.0.0.exe` via Inno Setup.
+- **System Integration:** Native Windows `os.startfile`, drive letter navigation (`C:\`, `D:\`), process group isolation, and Consolas monospace font.
+- **Build Command:** `scripts\build_windows.bat`
+
+*See [CROSS_PLATFORM.md](../CROSS_PLATFORM.md) for full instructions and automated GitHub Actions CI/CD pipeline details.*
 
 ---
 

@@ -12,8 +12,8 @@ import signal
 import sys
 from pathlib import Path
 
-# Ensure Qt 6.5+ xcb-cursor0 dependency is loaded seamlessly
-if os.environ.get("_WINSCP_XCB_LOADED") != "1":
+# Ensure Qt 6.5+ xcb-cursor0 dependency is loaded seamlessly on Linux
+if sys.platform.startswith("linux") and os.environ.get("_WINSCP_XCB_LOADED") != "1":
     candidates = [
         Path(__file__).resolve().parent.parent / "lib",
         Path.home() / ".local" / "lib",
@@ -175,8 +175,8 @@ def main():
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("WinSCP-Linux")
-    app.setOrganizationName("WinSCP-Linux")
+    app.setApplicationName("Nova Commander")
+    app.setOrganizationName("NovaCommander")
 
     # Set default application and window icon
     icon_candidates = [

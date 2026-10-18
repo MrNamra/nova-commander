@@ -14,7 +14,7 @@ import pytest
 
 def test_deb_package_exists_and_valid():
     repo_root = Path(__file__).resolve().parent.parent.parent
-    deb_path = repo_root / "dist" / "winscp-linux_1.0.0_amd64.deb"
+    deb_path = repo_root / "dist" / "nova-commander_1.0.0_amd64.deb"
 
     if not deb_path.exists():
         # Trigger build if not built yet
@@ -27,7 +27,7 @@ def test_deb_package_exists_and_valid():
 
 def test_deb_package_control_metadata():
     repo_root = Path(__file__).resolve().parent.parent.parent
-    deb_path = repo_root / "dist" / "winscp-linux_1.0.0_amd64.deb"
+    deb_path = repo_root / "dist" / "nova-commander_1.0.0_amd64.deb"
 
     res = subprocess.run(
         ["dpkg-deb", "-I", str(deb_path)],
@@ -38,7 +38,7 @@ def test_deb_package_control_metadata():
     )
     output = res.stdout
 
-    assert "Package: winscp-linux" in output
+    assert "Package: nova-commander" in output
     assert "Version: 1.0.0" in output
     assert "Architecture: amd64" in output
     assert "python3-pyqt6" in output
@@ -50,7 +50,7 @@ def test_deb_package_control_metadata():
 
 def test_deb_package_contents_and_structure(tmp_path: Path):
     repo_root = Path(__file__).resolve().parent.parent.parent
-    deb_path = repo_root / "dist" / "winscp-linux_1.0.0_amd64.deb"
+    deb_path = repo_root / "dist" / "nova-commander_1.0.0_amd64.deb"
 
     # Inspect table of contents
     res = subprocess.run(
@@ -62,29 +62,30 @@ def test_deb_package_contents_and_structure(tmp_path: Path):
     )
     contents = res.stdout
 
+    assert "./usr/bin/nova-commander" in contents
     assert "./usr/bin/winscp-linux" in contents
-    assert "./usr/share/applications/winscp-linux.desktop" in contents
-    assert "./usr/share/icons/hicolor/scalable/apps/winscp-linux.svg" in contents
-    assert "./usr/share/icons/hicolor/256x256/apps/winscp-linux.png" in contents
-    assert "./usr/share/pixmaps/winscp-linux.png" in contents
-    assert "./opt/winscp-linux/src/main.py" in contents
-    assert "./opt/winscp-linux/lib/libxcb-cursor.so.0" in contents
+    assert "./usr/share/applications/nova-commander.desktop" in contents
+    assert "./usr/share/icons/hicolor/scalable/apps/nova-commander.svg" in contents
+    assert "./usr/share/icons/hicolor/256x256/apps/nova-commander.png" in contents
+    assert "./usr/share/pixmaps/nova-commander.png" in contents
+    assert "./opt/nova-commander/src/main.py" in contents
+    assert "./opt/nova-commander/lib/libxcb-cursor.so.0" in contents
 
     # Extract to tmp_path to verify file permissions and executable bits
     extract_dir = tmp_path / "extracted"
     subprocess.run(["dpkg-deb", "-x", str(deb_path), str(extract_dir)], check=True)
 
-    launcher = extract_dir / "usr" / "bin" / "winscp-linux"
+    launcher = extract_dir / "usr" / "bin" / "nova-commander"
     assert launcher.exists()
     launcher_mode = launcher.stat().st_mode
     assert bool(launcher_mode & stat.S_IXUSR), "Launcher must be executable by user"
 
-    desktop_file = extract_dir / "usr" / "share" / "applications" / "winscp-linux.desktop"
+    desktop_file = extract_dir / "usr" / "share" / "applications" / "nova-commander.desktop"
     assert desktop_file.exists()
     desktop_text = desktop_file.read_text(encoding="utf-8")
-    assert "Exec=/usr/bin/winscp-linux %U" in desktop_text
-    assert "Icon=winscp-linux" in desktop_text
+    assert "Exec=/usr/bin/nova-commander %U" in desktop_text
+    assert "Icon=nova-commander" in desktop_text
     assert "Categories=Network;FileTransfer;" in desktop_text
 
-    app_main = extract_dir / "opt" / "winscp-linux" / "src" / "main.py"
+    app_main = extract_dir / "opt" / "nova-commander" / "src" / "main.py"
     assert app_main.exists()

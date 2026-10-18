@@ -25,8 +25,12 @@ from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
+    QStatusBar,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -70,8 +74,9 @@ class TerminalCanvas(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
-        # Monospace Font
-        self._font = QFont("DejaVu Sans Mono", 11)
+        # Monospace Font (Cross-Platform: Consolas on Windows, Menlo on macOS, DejaVu on Linux)
+        font_family = "Consolas" if sys.platform == "win32" else ("Menlo" if sys.platform == "darwin" else "DejaVu Sans Mono")
+        self._font = QFont(font_family, 11)
         self._font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(self._font)
 
@@ -355,3 +360,105 @@ class TerminalWidget(QWidget):
     def _on_session_closed(self):
         self.status_label.setText("● Session Terminated")
         self.status_label.setStyleSheet("color: #f44747; font-weight: bold;")
+
+
+class SSHTerminalWindow(QMainWindow):
+    """
+    Dedicated standalone SSH Terminal Window for WinSCP-Linux (Shortcut: Ctrl+P).
+    Runs an interactive terminal shell session in its own independent window.
+    """
+
+    def __init__(
+        self,
+        ssh_client: Optional[object] = None,
+        host: str = "",
+        port: int = 22,
+        username: str = "",
+        password: str = "",
+        private_key: str = "",
+        passphrase: str = "",
+        session_name: str = "",
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.private_key = private_key
+        self.passphrase = passphrase
+        self.session_name = session_name or (f"{username}@{host}" if host else "SSH Terminal")
+
+        self.setWindowTitle(f"Nova Commander - SSH Terminal: {self.session_name}")
+        self.resize(860, 540)
+
+        self.shell_client = SSHShellClient(self)
+        self.terminal_widget = TerminalWidget(self.shell_client, self)
+        # In a top-level window, the close button on the panel closes the window
+        self.terminal_widget.close_requested.connect(self.close)
+
+        self.setCentralWidget(self.terminal_widget)
+
+        self._setup_menus_and_toolbars()
+        self._setup_statusbar()
+
+        # Connect shell
+        self._connect_shell(ssh_client)
+
+    def _setup_menus_and_toolbars(self):
+        toolbar = QToolBar("Terminal Controls")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        act_copy = toolbar.addAction("📋 Copy")
+        act_copy.setToolTip("Copy terminal screen to clipboard (Ctrl+Shift+C)")
+        act_copy.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        act_copy.triggered.connect(self.terminal_widget.canvas.copy_selection)
+
+        act_paste = toolbar.addAction("📋 Paste")
+        act_paste.setToolTip("Paste clipboard text into terminal (Ctrl+Shift+V)")
+        act_paste.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        act_paste.triggered.connect(self.terminal_widget.canvas.paste_clipboard)
+
+        act_clear = toolbar.addAction("🧹 Clear")
+        act_clear.setToolTip("Clear terminal screen buffer")
+        act_clear.triggered.connect(self.terminal_widget.canvas.clear_screen)
+
+        toolbar.addSeparator()
+
+        act_reconnect = toolbar.addAction("🔄 Restart Shell")
+        act_reconnect.setToolTip("Reconnect/Restart interactive SSH terminal shell")
+        act_reconnect.triggered.connect(lambda: self._connect_shell())
+
+    def _setup_statusbar(self):
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.lbl_term_status = QLabel(f"Host: {self.host or 'Connected'} | Port: {self.port}")
+        self.status_bar.addWidget(self.lbl_term_status, 1)
+
+    def _connect_shell(self, ssh_client: Optional[object] = None):
+        try:
+            cols = self.terminal_widget.canvas.cols
+            rows = self.terminal_widget.canvas.rows
+            self.shell_client.open_shell(
+                ssh_client=ssh_client,
+                host=self.host,
+                port=self.port,
+                username=self.username,
+                password=self.password,
+                private_key=self.private_key,
+                passphrase=self.passphrase,
+                cols=cols,
+                rows=rows,
+            )
+            user_disp = self.username or "user"
+            host_disp = self.host or "remote"
+            self.terminal_widget.set_session_info(user_disp, host_disp)
+            self.lbl_term_status.setText(f"Connected to {user_disp}@{host_disp}:{self.port} | Mode: Interactive Shell")
+        except Exception as exc:
+            self.lbl_term_status.setText(f"Connection failed: {exc}")
+            QMessageBox.critical(self, "Terminal Connection Error", f"Could not launch SSH terminal:\n{exc}")
+
+    def closeEvent(self, event):
+        self.shell_client.close()
+        super().closeEvent(event)

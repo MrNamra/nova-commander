@@ -21,11 +21,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-PACKAGE_NAME = "winscp-linux"
+PACKAGE_NAME = "nova-commander"
 VERSION = "1.0.0"
 ARCHITECTURE = "amd64"
-MAINTAINER = "WinSCP-Linux Team <support@winscp-linux.org>"
-HOMEPAGE = "https://github.com/winscp-linux/winscp-linux"
+MAINTAINER = "Nova Commander Team <support@novacommander.org>"
+HOMEPAGE = "https://github.com/novacommander/nova-commander"
 
 
 def create_deb_package(repo_root: Path) -> Path:
@@ -82,13 +82,14 @@ def create_deb_package(repo_root: Path) -> Path:
     if (repo_root / "main.py").exists():
         shutil.copy2(repo_root / "main.py", opt_app_dir / "main.py")
 
-    # 3. Create /usr/bin/winscp-linux Launcher Script
-    print("  -> Generating /usr/bin/winscp-linux wrapper...")
+    # 3. Create /usr/bin/nova-commander Launcher Script & Symlink
+    print(f"  -> Generating /usr/bin/{PACKAGE_NAME} wrapper...")
     launcher_path = usr_bin_dir / PACKAGE_NAME
     launcher_content = f"""#!/usr/bin/env bash
 # Launcher wrapper for {PACKAGE_NAME}
 set -e
 
+export _NOVA_APP_DIR="/opt/{PACKAGE_NAME}"
 export _WINSCP_APP_DIR="/opt/{PACKAGE_NAME}"
 if [ -d "/opt/{PACKAGE_NAME}/lib" ]; then
     export LD_LIBRARY_PATH="/opt/{PACKAGE_NAME}/lib${{LD_LIBRARY_PATH:+:${{LD_LIBRARY_PATH}}}}"
@@ -100,23 +101,28 @@ exec python3 /opt/{PACKAGE_NAME}/src/main.py "$@"
     launcher_path.write_text(launcher_content, encoding="utf-8")
     launcher_path.chmod(0o755)
 
+    # Legacy compatibility symlink /usr/bin/winscp-linux -> nova-commander
+    legacy_symlink = usr_bin_dir / "winscp-linux"
+    if not legacy_symlink.exists():
+        legacy_symlink.symlink_to(PACKAGE_NAME)
+
     # 4. Create Desktop Entry in /usr/share/applications/
     print("  -> Generating desktop entry...")
     desktop_file = usr_apps_dir / f"{PACKAGE_NAME}.desktop"
     desktop_content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
-Name=WinSCP-Linux
+Name=Nova Commander
 GenericName=SFTP & SSH Commander
-Comment=Native Linux alternative to WinSCP with Dual-Pane Commander, Auto-Sync, and Terminal
+Comment=Professional native Linux SFTP & SSH Dual-Pane Commander with Terminal and Auto-Sync
 Exec=/usr/bin/{PACKAGE_NAME} %U
 Icon={PACKAGE_NAME}
 Terminal=false
 Categories=Network;FileTransfer;
 MimeType=x-scheme-handler/sftp;x-scheme-handler/ssh;
-Keywords=sftp;ftp;ssh;winscp;commander;transfer;dual-pane;sync;
+Keywords=sftp;ftp;ssh;commander;transfer;dual-pane;sync;nova;
 StartupNotify=true
-StartupWMClass={PACKAGE_NAME}
+StartupWMClass=Nova Commander
 """
     desktop_file.write_text(desktop_content, encoding="utf-8")
     desktop_file.chmod(0o644)
@@ -130,6 +136,7 @@ StartupWMClass={PACKAGE_NAME}
     svg_target_dir.mkdir(parents=True, exist_ok=True)
     if (res_dir / "winscp-linux.svg").exists():
         shutil.copy2(res_dir / "winscp-linux.svg", svg_target_dir / f"{PACKAGE_NAME}.svg")
+        shutil.copy2(res_dir / "winscp-linux.svg", svg_target_dir / "winscp-linux.svg")
 
     # Standard PNG sizes
     icon_sizes = [16, 32, 48, 64, 128, 256, 512]
@@ -139,14 +146,18 @@ StartupWMClass={PACKAGE_NAME}
         target_size_dir.mkdir(parents=True, exist_ok=True)
         if size_png.exists():
             shutil.copy2(size_png, target_size_dir / f"{PACKAGE_NAME}.png")
+            shutil.copy2(size_png, target_size_dir / "winscp-linux.png")
         elif (res_dir / "winscp-linux.png").exists():
             shutil.copy2(res_dir / "winscp-linux.png", target_size_dir / f"{PACKAGE_NAME}.png")
+            shutil.copy2(res_dir / "winscp-linux.png", target_size_dir / "winscp-linux.png")
 
     # Pixmaps for classic menus
     if (res_dir / "winscp-linux-48x48.png").exists():
         shutil.copy2(res_dir / "winscp-linux-48x48.png", usr_pixmaps_dir / f"{PACKAGE_NAME}.png")
+        shutil.copy2(res_dir / "winscp-linux-48x48.png", usr_pixmaps_dir / "winscp-linux.png")
     elif (res_dir / "winscp-linux.png").exists():
         shutil.copy2(res_dir / "winscp-linux.png", usr_pixmaps_dir / f"{PACKAGE_NAME}.png")
+        shutil.copy2(res_dir / "winscp-linux.png", usr_pixmaps_dir / "winscp-linux.png")
 
     # 6. Documentation & Copyright
     print("  -> Generating package documentation & changelog...")
@@ -253,9 +264,10 @@ Installed-Size: {installed_size_kb}
 Maintainer: {MAINTAINER}
 Depends: python3 (>= 3.10), python3-pyqt6, python3-paramiko, python3-cryptography, python3-watchdog, python3-httpx
 Recommends: libxcb-cursor0, xdg-utils
+Provides: winscp-linux
 Homepage: {HOMEPAGE}
-Description: Native Linux alternative to WinSCP (SFTP/SSH Dual-Pane Commander)
- WinSCP-Linux is a full-featured native Linux desktop alternative to WinSCP.
+Description: Professional native Linux SFTP & SSH Dual-Pane Commander
+ Nova Commander is a full-featured native Linux desktop commander for SFTP and SSH.
  Features include:
   * Multi-session tabbed commander architecture
   * Dual-pane local and remote SFTP/SSH filesystem navigation
@@ -263,7 +275,7 @@ Description: Native Linux alternative to WinSCP (SFTP/SSH Dual-Pane Commander)
   * Direct remote file editing with inotify auto-sync upon saving
   * Embedded interactive VT100/ANSI Linux terminal per connection
   * "Open With" application selector with configurable defaults
-  * AES-256-GCM encrypted WinSCP .ini session export and cloud backup
+  * AES-256-GCM encrypted session backup and WinSCP .ini compatibility
 """
     control_file.write_text(control_content, encoding="utf-8")
     control_file.chmod(0o644)

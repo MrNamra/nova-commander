@@ -51,8 +51,8 @@ class ExportDialog(QDialog):
         self.session_store = session_store
         self.cloud_client = CloudClient()
 
-        self.setWindowTitle("WinSCP-Linux - Export & Cloud Backup")
-        self.resize(650, 500)
+        self.setWindowTitle("Nova Commander - Session Export & Import")
+        self.resize(650, 480)
 
         self._setup_ui()
         self._populate_sessions()
@@ -63,15 +63,15 @@ class ExportDialog(QDialog):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
-        # Tab 1: Export & Cloud Backup
+        # Tab 1: Export Sessions (Local Encrypted / INI)
         self.tab_export = QWidget()
         self._setup_export_tab()
-        self.tabs.addTab(self.tab_export, "📤 Export / Upload to Cloud")
+        self.tabs.addTab(self.tab_export, "📤 Export Sessions")
 
-        # Tab 2: Import from Cloud / File
+        # Tab 2: Import Sessions (Local File)
         self.tab_import = QWidget()
         self._setup_import_tab()
-        self.tabs.addTab(self.tab_import, "📥 Import from Cloud / File")
+        self.tabs.addTab(self.tab_import, "📥 Import Sessions")
 
         # Bottom buttons
         bottom_bar = QHBoxLayout()
@@ -109,7 +109,7 @@ class ExportDialog(QDialog):
 
         self.txt_export_pwd = QLineEdit()
         self.txt_export_pwd.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_export_pwd.setPlaceholderText("Enter a strong Master Password")
+        self.txt_export_pwd.setPlaceholderText("Enter a strong Master Password (optional for plain .ini)")
         pwd_form.addRow("Master Password:", self.txt_export_pwd)
 
         self.txt_export_pwd_confirm = QLineEdit()
@@ -120,16 +120,17 @@ class ExportDialog(QDialog):
         layout.addWidget(grp_pwd)
 
         # 3. Actions
-        act_box = QGroupBox("3. Choose Export Destination")
+        act_box = QGroupBox("3. Export Destination")
         act_layout = QHBoxLayout(act_box)
 
+        # Cloud upload button hidden for now
         self.btn_upload_cloud = QPushButton("☁ Upload to Cloud (7-Day Retention)")
         self.btn_upload_cloud.setStyleSheet("font-weight: bold; background-color: #0366d6; color: white; padding: 6px 12px;")
+        self.btn_upload_cloud.hide()
 
-        self.btn_export_file = QPushButton("💾 Save Encrypted File...")
-        self.btn_export_plain = QPushButton("📄 Save Plain WinSCP .ini...")
+        self.btn_export_file = QPushButton("🔐 Save Encrypted .enc File...")
+        self.btn_export_plain = QPushButton("📄 Save Plain .ini File...")
 
-        act_layout.addWidget(self.btn_upload_cloud)
         act_layout.addWidget(self.btn_export_file)
         act_layout.addWidget(self.btn_export_plain)
         layout.addWidget(act_box)
@@ -147,9 +148,9 @@ class ExportDialog(QDialog):
     def _setup_import_tab(self):
         layout = QVBoxLayout(self.tab_import)
 
-        # Group 1: Cloud Import
-        grp_cloud = QGroupBox("Import from Cloud")
-        c_layout = QFormLayout(grp_cloud)
+        # Group 1: Cloud Import (hidden for now)
+        self.grp_cloud = QGroupBox("Import from Cloud")
+        c_layout = QFormLayout(self.grp_cloud)
 
         self.txt_import_share_id = QLineEdit()
         self.txt_import_share_id.setPlaceholderText("Enter Share ID or Share URL (e.g. demo-a1b2c3d4)")
@@ -164,10 +165,10 @@ class ExportDialog(QDialog):
         self.btn_import_cloud.setStyleSheet("font-weight: bold; background-color: #238636; color: white; padding: 6px;")
         c_layout.addRow("", self.btn_import_cloud)
 
-        layout.addWidget(grp_cloud)
+        self.grp_cloud.hide()
 
         # Group 2: File Import
-        grp_file = QGroupBox("Import from Local File (.ini or encrypted blob)")
+        grp_file = QGroupBox("Import from Local File (.enc or .ini)")
         f_layout = QFormLayout(grp_file)
 
         self.txt_import_file_pwd = QLineEdit()
@@ -175,7 +176,7 @@ class ExportDialog(QDialog):
         self.txt_import_file_pwd.setPlaceholderText("Only required if file is encrypted")
         f_layout.addRow("Password (if encrypted):", self.txt_import_file_pwd)
 
-        self.btn_import_file = QPushButton("📂 Browse and Import File...")
+        self.btn_import_file = QPushButton("📂 Browse and Import File (.enc / .ini)...")
         f_layout.addRow("", self.btn_import_file)
 
         layout.addWidget(grp_file)

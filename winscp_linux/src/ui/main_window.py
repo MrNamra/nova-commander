@@ -75,22 +75,29 @@ from ..core.sftp_client import (
     SFTPListDirWorker,
     SFTPUploadWorker,
 )
-from ..core.editor_manager import editor_preferences
+from ..core.editor_manager import editor_preferences, launch_external_editor
 from ..core.ssh_client import SSHShellClient
 from ..core.sync_engine import SyncEngine
 from .export_dialog import ExportDialog
-from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog
+from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog, SimpleOpenPromptDialog
 from .session_dialog import SessionDialog
-from .terminal_widget import TerminalWidget
+from .terminal_widget import SSHTerminalWindow, TerminalWidget
 
 
 class ChmodDialog(QDialog):
     """WinSCP-style file permission (chmod) editor dialog."""
 
-    def __init__(self, target_name: str, current_octal: str = "755", parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        target_name: str,
+        current_octal: str = "755",
+        is_dir: bool = False,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
+        self.is_dir = is_dir
         self.setWindowTitle(f"Change Permissions - {target_name}")
-        self.resize(360, 240)
+        self.resize(380, 270 if is_dir else 240)
 
         layout = QVBoxLayout(self)
 
@@ -129,6 +136,11 @@ class ChmodDialog(QDialog):
         g_layout.addLayout(row_other)
 
         layout.addWidget(group)
+
+        # Recursive checkbox for folders
+        if is_dir:
+            self.cb_recursive = QCheckBox("Apply permissions recursively to all subfolders and files")
+            layout.addWidget(self.cb_recursive)
 
         # Octal value input
         oct_layout = QHBoxLayout()
@@ -198,6 +210,9 @@ class ChmodDialog(QDialog):
             return int(clean, 8)
         except ValueError:
             return 0o755
+
+    def is_recursive(self) -> bool:
+        return getattr(self, "cb_recursive", None) is not None and self.cb_recursive.isChecked()
 
 
 class CommanderTableWidget(QTableWidget):
@@ -521,6 +536,7 @@ class SessionCommanderView(QWidget):
             username=session.username,
             password=session.password,
             private_key=session.private_key,
+            passphrase=getattr(session, "passphrase", ""),
             initial_remote_dir=session.remote_dir or "/",
         )
         self._active_worker = worker
@@ -539,6 +555,18 @@ class SessionCommanderView(QWidget):
 
         def _on_failed(err: str):
             self.progress_changed.emit(0)
+            if "passphrase" in err.lower() and session.private_key:
+                key_name = Path(session.private_key).name
+                phrase, ok = QInputDialog.getText(
+                    self,
+                    "Key Passphrase Required",
+                    f"The private key '{key_name}' is encrypted with a passphrase.\nPlease enter passphrase:",
+                    QLineEdit.EchoMode.Password,
+                )
+                if ok and phrase:
+                    session.passphrase = phrase
+                    self.connect_to_session(session)
+                    return
             self.status_message.emit(f"Connection failed: {err}")
             QMessageBox.critical(self, "Connection Error", f"Could not connect to {session.host}:\n{err}")
 
@@ -601,6 +629,41 @@ class SessionCommanderView(QWidget):
         else:
             self.open_terminal()
 
+    def open_terminal_window(self):
+        """Opens a dedicated SSH interactive terminal in a new standalone window (Ctrl+P)."""
+        if not self.sftp_client.is_connected:
+            reply = QMessageBox.question(
+                self,
+                "No Active Session",
+                "No SSH session is currently connected in this tab.\nWould you like to open the Connection Dialog?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                main_win = self.window()
+                if hasattr(main_win, "open_session_dialog"):
+                    main_win.open_session_dialog()
+            return
+
+        session_name = self.current_session.name if self.current_session else ""
+        term_win = SSHTerminalWindow(
+            ssh_client=self.sftp_client.ssh_client,
+            host=self.sftp_client.host,
+            port=self.sftp_client.port,
+            username=self.sftp_client.username,
+            session_name=session_name,
+            parent=None,
+        )
+
+        if not hasattr(self, "_term_windows"):
+            self._term_windows = []
+        self._term_windows.append(term_win)
+        term_win.destroyed.connect(lambda: self._term_windows.remove(term_win) if term_win in self._term_windows else None)
+
+        term_win.show()
+        term_win.raise_()
+        term_win.activateWindow()
+        self.status_message.emit("Opened SSH terminal in new window (Ctrl+P).")
+
     # ----------------- Local Pane -----------------
     def _load_local_directory(self, dir_path: str):
         target = Path(dir_path).expanduser().resolve()
@@ -619,6 +682,16 @@ class SessionCommanderView(QWidget):
             self._set_table_item(self.table_local, row, 1, "")
             self._set_table_item(self.table_local, row, 2, "drwxr-xr-x")
             self._set_table_item(self.table_local, row, 3, "")
+        elif sys.platform == "win32":
+            for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                drive = f"{letter}:\\"
+                if os.path.exists(drive) and drive.lower() != str(target).lower():
+                    row = self.table_local.rowCount()
+                    self.table_local.insertRow(row)
+                    self._set_table_item(self.table_local, row, 0, f"Drive ({letter}:)", is_dir=True, path=drive)
+                    self._set_table_item(self.table_local, row, 1, "")
+                    self._set_table_item(self.table_local, row, 2, "drive")
+                    self._set_table_item(self.table_local, row, 3, "")
 
         try:
             entries = list(target.iterdir())
@@ -679,35 +752,25 @@ class SessionCommanderView(QWidget):
         local_path = data["path"]
 
         chosen_editor = None
-        if not force_open_with:
-            chosen_editor = editor_preferences.get_editor_for_file(local_path)
-
-        if not chosen_editor:
+        if force_open_with:
             dlg = OpenWithDialog(local_path, pref_manager=editor_preferences, parent=self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             chosen_editor = dlg.get_selected_command()
+        else:
+            chosen_editor = editor_preferences.get_editor_for_file(local_path)
+            if not chosen_editor:
+                prompt_dlg = SimpleOpenPromptDialog(local_path, pref_manager=editor_preferences, parent=self)
+                if prompt_dlg.exec() != QDialog.DialogCode.Accepted:
+                    return
+                chosen_editor = prompt_dlg.get_selected_command()
 
         self.status_message.emit(f"Opening local file: {local_path}...")
         try:
-            cmd = []
-            if chosen_editor and chosen_editor.strip():
-                try:
-                    cmd = shlex.split(chosen_editor.strip()) + [local_path]
-                except Exception:
-                    cmd = chosen_editor.strip().split() + [local_path]
-            elif shutil.which("xdg-open"):
-                cmd = ["xdg-open", local_path]
-            else:
-                cmd = ["xdg-open", local_path]
-
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            launch_external_editor(chosen_editor, local_path)
             self.status_message.emit(f"Opened {Path(local_path).name} with '{chosen_editor}'.")
         except Exception as exc:
-            try:
-                subprocess.Popen(["xdg-open", local_path])
-            except Exception as e:
-                QMessageBox.critical(self, "Open Failed", f"Could not open local file: {exc} / {e}")
+            QMessageBox.critical(self, "Open Failed", f"Could not open local file:\n{exc}")
 
     # ----------------- Remote Pane -----------------
     def _load_remote_directory(self, dir_path: str):
@@ -799,14 +862,18 @@ class SessionCommanderView(QWidget):
 
         # Check editor preference or prompt user
         chosen_editor = None
-        if not force_open_with:
-            chosen_editor = editor_preferences.get_editor_for_file(remote_path)
-
-        if not chosen_editor:
+        if force_open_with:
             dlg = OpenWithDialog(remote_path, pref_manager=editor_preferences, parent=self)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             chosen_editor = dlg.get_selected_command()
+        else:
+            chosen_editor = editor_preferences.get_editor_for_file(remote_path)
+            if not chosen_editor:
+                prompt_dlg = SimpleOpenPromptDialog(remote_path, pref_manager=editor_preferences, parent=self)
+                if prompt_dlg.exec() != QDialog.DialogCode.Accepted:
+                    return
+                chosen_editor = prompt_dlg.get_selected_command()
 
         self.status_message.emit(f"Opening remote file for editing: {remote_path}...")
 
@@ -1071,9 +1138,17 @@ class SessionCommanderView(QWidget):
         self._execute_batch_transfer(transfers, refresh_pane="local")
 
     def chmod_selected(self):
-        if self.table_remote.hasFocus() or (self.sftp_client.is_connected and self.table_remote.selectedItems()):
+        # Check whether remote or local pane is active
+        is_remote = self.table_remote.hasFocus() or (
+            not self.table_local.hasFocus()
+            and self.sftp_client.is_connected
+            and bool(self.table_remote.selectedItems())
+        )
+
+        if is_remote and self.sftp_client.is_connected:
             selected = self.table_remote.selectedItems()
             if not selected:
+                QMessageBox.information(self, "No Item Selected", "Please select a remote file or folder to change permissions.")
                 return
             row = selected[0].row()
             data = self.table_remote.item(row, 0).data(Qt.ItemDataRole.UserRole)
@@ -1082,20 +1157,76 @@ class SessionCommanderView(QWidget):
 
             info: Optional[RemoteFileInfo] = data.get("info")
             current_oct = info.permissions_octal if info else "755"
+            is_dir = bool(data.get("is_dir", False))
 
-            dlg = ChmodDialog(data["name"], current_oct, self)
+            dlg = ChmodDialog(data["name"], current_oct, is_dir=is_dir, parent=self)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 new_mode = dlg.get_mode_int()
+                recursive = dlg.is_recursive()
+                action_fn = (
+                    (lambda: self.sftp_client.chmod_recursive(data["path"], new_mode))
+                    if recursive and is_dir
+                    else (lambda: self.sftp_client.chmod(data["path"], new_mode))
+                )
+                rec_label = " (recursively)" if (recursive and is_dir) else ""
                 worker = SFTPActionWorker(
-                    action_fn=lambda: self.sftp_client.chmod(data["path"], new_mode),
-                    success_msg=f"Permissions updated to {oct(new_mode)[2:]} for {data['name']}",
+                    action_fn=action_fn,
+                    success_msg=f"Permissions updated to {oct(new_mode)[2:]}{rec_label} for {data['name']}",
                 )
                 self._active_worker = worker
                 worker.finished.connect(
                     lambda msg: (self.status_message.emit(msg), self._load_remote_directory(self.txt_remote_path.text()))
                 )
-                worker.failed.connect(lambda err: QMessageBox.critical(self, "Chmod Error", err))
+                worker.failed.connect(lambda err: QMessageBox.critical(self, "Chmod Error", f"Could not change permissions:\n{err}"))
                 worker.start()
+        else:
+            # Local filesystem chmod
+            selected = self.table_local.selectedItems()
+            if not selected:
+                QMessageBox.information(self, "No Item Selected", "Please select a local file or folder to change permissions.")
+                return
+            row = selected[0].row()
+            data = self.table_local.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                return
+
+            local_path = data["path"]
+            if not os.path.exists(local_path):
+                return
+
+            is_dir = os.path.isdir(local_path)
+            try:
+                current_oct = oct(os.stat(local_path).st_mode & 0o777)[2:].zfill(3)
+            except Exception:
+                current_oct = "755"
+
+            dlg = ChmodDialog(data["name"], current_oct, is_dir=is_dir, parent=self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                new_mode = dlg.get_mode_int()
+                recursive = dlg.is_recursive()
+                try:
+                    if recursive and is_dir:
+                        os.chmod(local_path, new_mode)
+                        for root, dirs, files in os.walk(local_path):
+                            for d in dirs:
+                                try:
+                                    os.chmod(os.path.join(root, d), new_mode)
+                                except Exception:
+                                    pass
+                            for f in files:
+                                try:
+                                    os.chmod(os.path.join(root, f), new_mode)
+                                except Exception:
+                                    pass
+                    else:
+                        os.chmod(local_path, new_mode)
+
+                    rec_label = " (recursively)" if (recursive and is_dir) else ""
+                    msg = f"Local permissions updated to {oct(new_mode)[2:]}{rec_label} for {data['name']}"
+                    self.status_message.emit(msg)
+                    self._load_local_directory(self.txt_local_path.text())
+                except Exception as exc:
+                    QMessageBox.critical(self, "Chmod Error", f"Could not change local permissions:\n{exc}")
 
     def delete_selected(self):
         if self.table_remote.hasFocus() and self.sftp_client.is_connected:
@@ -1221,12 +1352,19 @@ class SessionCommanderView(QWidget):
         return f"{size_bytes:.1f} PB"
 
     def _show_local_context_menu(self, pos: QPoint):
+        item = self.table_local.itemAt(pos)
+        if item:
+            self.table_local.setCurrentItem(item)
+            self.table_local.selectRow(item.row())
+
         menu = QMenu(self)
         act_open = menu.addAction("✏ Open / Edit (F4)")
         act_open.triggered.connect(lambda: self.open_selected_local_file(force_open_with=False))
         act_open_with = menu.addAction("📂 Open With...")
         act_open_with.triggered.connect(lambda: self.open_selected_local_file(force_open_with=True))
         menu.addSeparator()
+        act_chmod = menu.addAction("🔒 Properties / Chmod (F9)")
+        act_chmod.triggered.connect(self.chmod_selected)
         if self.sftp_client.is_connected:
             act_up = menu.addAction("⬆ Upload to Remote (F5)")
             act_up.triggered.connect(self.upload_selected)
@@ -1240,6 +1378,11 @@ class SessionCommanderView(QWidget):
         menu.exec(self.table_local.mapToGlobal(pos))
 
     def _show_remote_context_menu(self, pos: QPoint):
+        item = self.table_remote.itemAt(pos)
+        if item:
+            self.table_remote.setCurrentItem(item)
+            self.table_remote.selectRow(item.row())
+
         menu = QMenu(self)
         act_edit = menu.addAction("✏ Edit & Auto-Sync (F4)")
         act_edit.triggered.connect(lambda: self.edit_selected_remote_file(force_open_with=False))
@@ -1276,7 +1419,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.session_store = session_store or SessionStore()
 
-        self.setWindowTitle("WinSCP-Linux")
+        self.setWindowTitle("Nova Commander")
         self.resize(1180, 780)
 
         self._setup_ui()
@@ -1333,7 +1476,7 @@ class MainWindow(QMainWindow):
         act_disconnect.triggered.connect(self.disconnect_session)
 
         m_session.addSeparator()
-        act_export = m_session.addAction("Export / Cloud Backup...")
+        act_export = m_session.addAction("Export / Import Sessions...")
         act_export.triggered.connect(self.open_export_dialog)
 
         m_session.addSeparator()
@@ -1378,6 +1521,10 @@ class MainWindow(QMainWindow):
         act_term.setShortcut("Ctrl+T")
         act_term.triggered.connect(self.open_terminal)
 
+        act_term_win = m_cmd.addAction("Open Terminal in New Window (Ctrl+P)")
+        act_term_win.setShortcut("Ctrl+P")
+        act_term_win.triggered.connect(self.open_terminal_window)
+
         # View Menu
         m_view = menubar.addMenu("&View")
         act_refresh = m_view.addAction("Refresh (Ctrl+R)")
@@ -1389,7 +1536,7 @@ class MainWindow(QMainWindow):
 
         # Help Menu
         m_help = menubar.addMenu("&Help")
-        act_about = m_help.addAction("About WinSCP-Linux")
+        act_about = m_help.addAction("About Nova Commander")
         act_about.triggered.connect(self._show_about)
 
     def _setup_toolbars(self):
@@ -1432,11 +1579,16 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self.tb_term = toolbar.addAction("💻 Terminal")
+        self.tb_term = toolbar.addAction("💻 Terminal (Ctrl+T)")
         self.tb_term.triggered.connect(self.open_terminal)
 
+        self.tb_term_win = toolbar.addAction("🖥 Terminal Window (Ctrl+P)")
+        self.tb_term_win.triggered.connect(self.open_terminal_window)
+
+        # Cloud backup hidden for now per user request
         self.tb_cloud = toolbar.addAction("☁ Cloud Backup")
         self.tb_cloud.triggered.connect(self.open_export_dialog)
+        self.tb_cloud.setVisible(False)
 
     def _setup_statusbar(self):
         self.status_bar = QStatusBar()
@@ -1652,6 +1804,10 @@ class MainWindow(QMainWindow):
         if view := self.active_session_view():
             view._toggle_terminal()
 
+    def open_terminal_window(self):
+        if view := self.active_session_view():
+            view.open_terminal_window()
+
     def refresh_both(self):
         if view := self.active_session_view():
             view.refresh_both()
@@ -1692,16 +1848,16 @@ class MainWindow(QMainWindow):
     def _show_about(self):
         QMessageBox.about(
             self,
-            "About WinSCP-Linux",
-            "<h3>WinSCP-Linux</h3>"
-            "<p>A native Linux alternative to WinSCP featuring:</p>"
+            "About Nova Commander",
+            "<h3>Nova Commander</h3>"
+            "<p>A professional native Linux dual-pane SFTP and SSH commander featuring:</p>"
             "<ul>"
             "<li>Multi-Session Tabbed SSH / SFTP Commander</li>"
             "<li>Bidirectional Drag & Drop Transfers for Files and Folders</li>"
             "<li>Live Remote Direct-Edit with Watchdog (inotify) Auto-Sync</li>"
             "<li>Embedded Interactive SSH Shell Terminal per Connection</li>"
             "<li>WinSCP-Compatible .ini Export & Import</li>"
-            "<li>AES-256-GCM + PBKDF2HMAC (600,000 rounds) Encrypted Cloud Sharing</li>"
+            "<li>AES-256-GCM + PBKDF2HMAC (600,000 rounds) Encrypted Backups</li>"
             "</ul>"
             "<p>Built with Python 3, PyQt6, Paramiko, and Cryptography.</p>",
         )
