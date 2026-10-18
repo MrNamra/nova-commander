@@ -1,11 +1,12 @@
 """
-Main Window (Dual-Pane Commander UI) for WinSCP-Linux.
-Implements:
-- Dual-pane filesystem commander (Local Linux filesystem on Left, Remote SFTP on Right).
-- WinSCP toolbar and context menus.
-- Remote file direct-edit with watchdog auto-sync.
-- Embedded SSH terminal panel.
-- Drag-and-drop transfers, chmod dialog, rename, mkdir, delete.
+Main Window (Multi-Session Dual-Pane Commander UI) for WinSCP-Linux.
+Supports:
+- Connecting to multiple SSH/SFTP servers simultaneously in individual tabs.
+- Full dual-pane filesystem commander per session (Local on Left, Remote SFTP on Right).
+- Bidirectional Drag-and-Drop for files and folders on both sides.
+- Live Remote Direct-Edit with Watchdog (inotify) auto-sync.
+- Embedded interactive SSH terminal per connection.
+- Standard WinSCP toolbars, menus, chmod dialog, and cloud backup actions.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
@@ -91,7 +93,7 @@ class ChmodDialog(QDialog):
         group = QGroupBox("Permissions")
         g_layout = QVBoxLayout(group)
 
-        # 3x3 Checkboxes: Owner, Group, Others (Read, Write, Execute)
+        # 3x3 Checkboxes: Owner, Group, Others
         row_owner = QHBoxLayout()
         row_owner.addWidget(QLabel("Owner: "))
         self.cb_or = QCheckBox("Read (4)")
@@ -271,7 +273,6 @@ class CommanderTableWidget(QTableWidget):
         drag = QDrag(self)
         mime = QMimeData()
 
-        # Set specific MIME identifier for WinSCP pane
         mime_format = f"application/x-winscp-{self.pane_type}-items"
         mime.setData(mime_format, json.dumps(drag_items).encode("utf-8"))
 
@@ -283,7 +284,6 @@ class CommanderTableWidget(QTableWidget):
 
         drag.setMimeData(mime)
 
-        # Drag visual badge preview
         first_item = drag_items[0]
         prefix = "📁" if first_item["is_dir"] else "📄"
         count_suffix = f" (+{len(drag_items)-1})" if len(drag_items) > 1 else ""
@@ -370,47 +370,44 @@ class CommanderTableWidget(QTableWidget):
             event.ignore()
 
 
-class MainWindow(QMainWindow):
+class SessionCommanderView(QWidget):
     """
-    WinSCP-Linux Commander Main Window.
+    An independent, self-contained SFTP & SSH commander view for a single server session.
+    Features its own local/remote file tables, terminal, sync engine, and workers.
     """
 
-    def __init__(self, session_store: Optional[SessionStore] = None):
-        super().__init__()
-        self.session_store = session_store or SessionStore()
+    status_message = pyqtSignal(str)
+    progress_changed = pyqtSignal(int)
+    session_connected = pyqtSignal(str, str)  # (title, info_string)
+    session_disconnected = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None, initial_local_dir: Optional[str] = None):
+        super().__init__(parent)
         self.sftp_client = SFTPClient()
         self.ssh_shell = SSHShellClient(self)
         self.sync_engine = SyncEngine(self)
 
         self.current_session: Optional[SessionConfig] = None
         self.session_id: str = "default"
-
-        self.setWindowTitle("WinSCP-Linux")
-        self.resize(1180, 780)
-
         self._active_worker = None
 
         self._setup_ui()
-        self._setup_menus()
-        self._setup_toolbars()
-        self._setup_statusbar()
         self._wire_sync_engine()
 
         # Load initial local directory
-        self._load_local_directory(str(Path.home()))
+        init_dir = initial_local_dir or str(Path.home())
+        self._load_local_directory(init_dir)
 
     def _setup_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
 
         # Vertical splitter dividing Dual-Pane Commander and Embedded Terminal
         self.v_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_layout.addWidget(self.v_splitter)
+        layout.addWidget(self.v_splitter)
 
-        # ----------------- Dual-Pane Commander -----------------
+        # Dual-Pane container
         pane_container = QWidget()
         pane_layout = QHBoxLayout(pane_container)
         pane_layout.setContentsMargins(0, 0, 0, 0)
@@ -425,7 +422,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(2)
 
-        # Local Path Header
         local_header = QHBoxLayout()
         local_lbl = QLabel("💻 Local:")
         local_lbl.setStyleSheet("font-weight: bold; color: #569cd6;")
@@ -440,10 +436,8 @@ class MainWindow(QMainWindow):
         local_header.addWidget(self.btn_local_go)
         left_layout.addLayout(local_header)
 
-        # Local Table
         self.table_local = CommanderTableWidget("local", self)
         left_layout.addWidget(self.table_local)
-
         self.h_splitter.addWidget(left_widget)
 
         # === Right Panel: Remote Filesystem ===
@@ -452,7 +446,6 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
 
-        # Remote Path Header
         remote_header = QHBoxLayout()
         remote_lbl = QLabel("🌐 Remote:")
         remote_lbl.setStyleSheet("font-weight: bold; color: #4ec9b0;")
@@ -467,27 +460,25 @@ class MainWindow(QMainWindow):
         remote_header.addWidget(self.btn_remote_go)
         right_layout.addLayout(remote_header)
 
-        # Remote Table
         self.table_remote = CommanderTableWidget("remote", self)
         right_layout.addWidget(self.table_remote)
-
         self.h_splitter.addWidget(right_widget)
+
         self.h_splitter.setStretchFactor(0, 1)
         self.h_splitter.setStretchFactor(1, 1)
 
         self.v_splitter.addWidget(pane_container)
 
-        # ----------------- Embedded SSH Terminal Panel -----------------
+        # === Embedded Terminal Panel ===
         self.terminal_widget = TerminalWidget(self.ssh_shell, self)
         self.terminal_widget.close_requested.connect(self._toggle_terminal)
         self.v_splitter.addWidget(self.terminal_widget)
-
-        # Initially terminal is hidden or collapsed
         self.terminal_widget.hide()
+
         self.v_splitter.setStretchFactor(0, 3)
         self.v_splitter.setStretchFactor(1, 1)
 
-        # Navigation & Event Connections
+        # Connections
         self.btn_local_go.clicked.connect(self._on_local_go)
         self.txt_local_path.returnPressed.connect(self._on_local_go)
         self.btn_local_up.clicked.connect(self._on_local_up)
@@ -502,161 +493,22 @@ class MainWindow(QMainWindow):
         self.table_remote.customContextMenuRequested.connect(self._show_remote_context_menu)
         self.table_remote.items_dropped.connect(self._handle_items_dropped)
 
-    def _setup_menus(self):
-        menubar = self.menuBar()
-
-        # Session Menu
-        m_session = menubar.addMenu("&Session")
-        act_login = m_session.addAction("New Session...")
-        act_login.setShortcut("Ctrl+N")
-        act_login.triggered.connect(self.open_session_dialog)
-
-        act_disconnect = m_session.addAction("Disconnect")
-        act_disconnect.setShortcut("Ctrl+D")
-        act_disconnect.triggered.connect(self.disconnect_session)
-
-        m_session.addSeparator()
-        act_export = m_session.addAction("Export / Cloud Backup...")
-        act_export.triggered.connect(self.open_export_dialog)
-
-        m_session.addSeparator()
-        act_quit = m_session.addAction("Exit")
-        act_quit.setShortcut("Ctrl+Q")
-        act_quit.triggered.connect(self.close)
-
-        # Commands Menu
-        m_cmd = menubar.addMenu("&Commands")
-        act_upload = m_cmd.addAction("Upload (F5)")
-        act_upload.setShortcut("F5")
-        act_upload.triggered.connect(self.upload_selected)
-
-        act_download = m_cmd.addAction("Download (F5)")
-        act_download.triggered.connect(self.download_selected)
-
-        act_edit = m_cmd.addAction("Edit Remote File (F4)")
-        act_edit.setShortcut("F4")
-        act_edit.triggered.connect(self.edit_selected_remote_file)
-
-        act_del = m_cmd.addAction("Delete (F8)")
-        act_del.setShortcut("F8")
-        act_del.triggered.connect(self.delete_selected)
-
-        act_mkdir = m_cmd.addAction("New Directory (F7)")
-        act_mkdir.setShortcut("F7")
-        act_mkdir.triggered.connect(self.create_directory)
-
-        act_chmod = m_cmd.addAction("Properties / Chmod (F9)")
-        act_chmod.setShortcut("F9")
-        act_chmod.triggered.connect(self.chmod_selected)
-
-        m_cmd.addSeparator()
-        act_term = m_cmd.addAction("Open Terminal (Ctrl+T)")
-        act_term.setShortcut("Ctrl+T")
-        act_term.triggered.connect(self.open_terminal)
-
-        # View Menu
-        m_view = menubar.addMenu("&View")
-        act_refresh = m_view.addAction("Refresh (Ctrl+R)")
-        act_refresh.setShortcut("Ctrl+R")
-        act_refresh.triggered.connect(self.refresh_both)
-
-        self.act_toggle_term = m_view.addAction("Toggle Terminal")
-        self.act_toggle_term.triggered.connect(self._toggle_terminal)
-
-        # Help Menu
-        m_help = menubar.addMenu("&Help")
-        act_about = m_help.addAction("About WinSCP-Linux")
-        act_about.triggered.connect(self._show_about)
-
-    def _setup_toolbars(self):
-        toolbar = QToolBar("Main Operations")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
-        self.tb_connect = toolbar.addAction("🔌 Connect")
-        self.tb_connect.triggered.connect(self.open_session_dialog)
-
-        self.tb_disconnect = toolbar.addAction("⏹ Disconnect")
-        self.tb_disconnect.setEnabled(False)
-        self.tb_disconnect.triggered.connect(self.disconnect_session)
-
-        toolbar.addSeparator()
-
-        self.tb_refresh = toolbar.addAction("🔄 Refresh")
-        self.tb_refresh.triggered.connect(self.refresh_both)
-
-        self.tb_upload = toolbar.addAction("⬆ Upload")
-        self.tb_upload.triggered.connect(self.upload_selected)
-
-        self.tb_download = toolbar.addAction("⬇ Download")
-        self.tb_download.triggered.connect(self.download_selected)
-
-        self.tb_edit = toolbar.addAction("✏ Edit")
-        self.tb_edit.triggered.connect(self.edit_selected_remote_file)
-
-        self.tb_chmod = toolbar.addAction("🔒 Chmod")
-        self.tb_chmod.triggered.connect(self.chmod_selected)
-
-        self.tb_delete = toolbar.addAction("🗑 Delete")
-        self.tb_delete.triggered.connect(self.delete_selected)
-
-        self.tb_mkdir = toolbar.addAction("📁 New Folder")
-        self.tb_mkdir.triggered.connect(self.create_directory)
-
-        toolbar.addSeparator()
-
-        self.tb_term = toolbar.addAction("💻 Open Terminal")
-        self.tb_term.triggered.connect(self.open_terminal)
-
-        self.tb_cloud = toolbar.addAction("☁ Cloud Backup")
-        self.tb_cloud.triggered.connect(self.open_export_dialog)
-
-    def _setup_statusbar(self):
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-
-        self.lbl_status = QLabel("Ready")
-        self.status_bar.addWidget(self.lbl_status, 1)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setFixedWidth(200)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.hide()
-        self.status_bar.addPermanentWidget(self.progress_bar)
-
-        self.lbl_session = QLabel("🔴 Not Connected")
-        self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
-        self.status_bar.addPermanentWidget(self.lbl_session)
-
     def _wire_sync_engine(self):
-        self.sync_engine.sync_started.connect(self._on_sync_started)
+        self.sync_engine.sync_started.connect(
+            lambda r, l: self.status_message.emit(f"Auto-uploading saved changes to {r}...")
+        )
         self.sync_engine.sync_succeeded.connect(self._on_sync_succeeded)
-        self.sync_engine.sync_failed.connect(self._on_sync_failed)
-
-    # =========================================================================
-    # Session Management
-    # =========================================================================
-
-    def open_session_dialog(self):
-        dlg = SessionDialog(self.session_store, self)
-        dlg.login_requested.connect(self.connect_to_session)
-        dlg.export_requested.connect(self.open_export_dialog)
-        dlg.exec()
-
-    def open_export_dialog(self):
-        dlg = ExportDialog(self.session_store, self)
-        dlg.sessions_updated.connect(lambda: self.status_bar.showMessage("Sessions synchronized.", 3000))
-        dlg.exec()
+        self.sync_engine.sync_failed.connect(
+            lambda r, err: self.status_message.emit(f"❌ Auto-sync failed for {r}: {err}")
+        )
 
     def connect_to_session(self, session: SessionConfig):
-        """Connects to the given session via background QThread worker."""
+        """Connects to the specified session."""
         self.current_session = session
         self.session_id = f"{session.username}_{session.host}_{session.port}".replace("/", "_")
 
-        self.lbl_status.setText(f"Connecting to {session.username}@{session.host}:{session.port}...")
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.show()
+        self.status_message.emit(f"Connecting to {session.username}@{session.host}:{session.port}...")
+        self.progress_changed.emit(-1)
 
         worker = SFTPConnectWorker(
             sftp_client=self.sftp_client,
@@ -670,22 +522,20 @@ class MainWindow(QMainWindow):
         self._active_worker = worker
 
         def _on_connected(remote_home: str):
-            self.progress_bar.hide()
-            self.tb_disconnect.setEnabled(True)
-            self.lbl_session.setText(f"🟢 {session.username}@{session.host}:{session.port}")
-            self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #4ec9b0;")
-            self.lbl_status.setText(f"Connected to {session.host}")
+            self.progress_changed.emit(0)
+            self.status_message.emit(f"Connected to {session.host}")
 
-            # Refresh remote file list
             self.txt_remote_path.setText(remote_home)
             self._load_remote_directory(remote_home)
-
-            # Auto-open or initialize terminal if requested
             self._init_terminal_channel()
 
+            title = session.name if session.name else session.host
+            info = f"{session.username}@{session.host}:{session.port}"
+            self.session_connected.emit(title, info)
+
         def _on_failed(err: str):
-            self.progress_bar.hide()
-            self.lbl_status.setText("Connection failed")
+            self.progress_changed.emit(0)
+            self.status_message.emit(f"Connection failed: {err}")
             QMessageBox.critical(self, "Connection Error", f"Could not connect to {session.host}:\n{err}")
 
         worker.connected.connect(_on_connected)
@@ -693,22 +543,23 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def disconnect_session(self):
-        """Disconnects SFTP and SSH sessions and cleans up cache."""
+        """Disconnects SFTP and SSH and cleans up cache for this session."""
         self.sftp_client.disconnect()
         self.ssh_shell.close()
         self.sync_engine.cleanup_session(self.session_id)
 
         self.table_remote.setRowCount(0)
-        self.tb_disconnect.setEnabled(False)
         self.terminal_widget.hide()
-        self.lbl_session.setText("🔴 Not Connected")
-        self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
-        self.lbl_status.setText("Disconnected.")
+        self.session_disconnected.emit()
+        self.status_message.emit("Disconnected.")
 
-    # =========================================================================
-    # Terminal Integration
-    # =========================================================================
+    def cleanup(self):
+        """Gracefully tears down this session view and all background watchers."""
+        self.sftp_client.disconnect()
+        self.ssh_shell.close()
+        self.sync_engine.cleanup_session(self.session_id)
 
+    # ----------------- Terminal -----------------
     def _init_terminal_channel(self):
         if not self.sftp_client.is_connected or not self.sftp_client.ssh_client:
             return
@@ -726,7 +577,7 @@ class MainWindow(QMainWindow):
                     self.current_session.username, self.current_session.host
                 )
         except Exception as exc:
-            self.status_bar.showMessage(f"Terminal error: {exc}", 5000)
+            self.status_message.emit(f"Terminal error: {exc}")
 
     def open_terminal(self):
         if not self.sftp_client.is_connected:
@@ -738,7 +589,7 @@ class MainWindow(QMainWindow):
 
         self.terminal_widget.show()
         self.terminal_widget.canvas.setFocus()
-        self.status_bar.showMessage("SSH Terminal active.", 3000)
+        self.status_message.emit("SSH Terminal active.")
 
     def _toggle_terminal(self):
         if self.terminal_widget.isVisible():
@@ -746,10 +597,7 @@ class MainWindow(QMainWindow):
         else:
             self.open_terminal()
 
-    # =========================================================================
-    # Local Filesystem Pane
-    # =========================================================================
-
+    # ----------------- Local Pane -----------------
     def _load_local_directory(self, dir_path: str):
         target = Path(dir_path).expanduser().resolve()
         if not target.is_dir():
@@ -760,7 +608,6 @@ class MainWindow(QMainWindow):
         self.table_local.set_current_directory(str(target))
         self.table_local.setRowCount(0)
 
-        # Parent directory ..
         if target != target.parent:
             row = self.table_local.rowCount()
             self.table_local.insertRow(row)
@@ -775,7 +622,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Permission Denied", f"Cannot read directory: {e}")
             return
 
-        # Sort: directories first, then alphabetical
         entries.sort(key=lambda p: (0 if p.is_dir() else 1, p.name.lower()))
 
         for entry in entries:
@@ -812,27 +658,22 @@ class MainWindow(QMainWindow):
         if data and data.get("is_dir"):
             self._load_local_directory(data["path"])
         else:
-            # If double click file in local pane, offer to upload
             if self.sftp_client.is_connected:
                 self.upload_selected()
 
-    # =========================================================================
-    # Remote Filesystem Pane
-    # =========================================================================
-
+    # ----------------- Remote Pane -----------------
     def _load_remote_directory(self, dir_path: str):
         if not self.sftp_client.is_connected:
             return
 
-        self.lbl_status.setText(f"Loading {dir_path}...")
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.show()
+        self.status_message.emit(f"Loading {dir_path}...")
+        self.progress_changed.emit(-1)
 
         worker = SFTPListDirWorker(self.sftp_client, dir_path)
         self._active_worker = worker
 
         def _on_success(items: List[RemoteFileInfo], current_dir: str):
-            self.progress_bar.hide()
+            self.progress_changed.emit(0)
             self.txt_remote_path.setText(current_dir)
             self.table_remote.set_current_directory(current_dir)
             self.table_remote.setRowCount(0)
@@ -854,11 +695,11 @@ class MainWindow(QMainWindow):
                 self._set_table_item(self.table_remote, row, 2, f"{item.permissions_octal} ({item.permissions_str})")
                 self._set_table_item(self.table_remote, row, 3, item.modified_str)
 
-            self.lbl_status.setText(f"Loaded {len(items)} items in {current_dir}")
+            self.status_message.emit(f"Loaded {len(items)} items in {current_dir}")
 
         def _on_failed(err: str):
-            self.progress_bar.hide()
-            self.lbl_status.setText("Failed to list remote directory")
+            self.progress_changed.emit(0)
+            self.status_message.emit("Failed to list remote directory")
             QMessageBox.critical(self, "Remote Directory Error", f"Could not list '{dir_path}':\n{err}")
 
         worker.success.connect(_on_success)
@@ -887,21 +728,10 @@ class MainWindow(QMainWindow):
         if data.get("is_dir"):
             self._load_remote_directory(data["path"])
         else:
-            # Double click file -> Direct Edit & Auto Sync
             self.edit_selected_remote_file()
 
-    # =========================================================================
-    # Remote Direct-Edit and Auto-Sync
-    # =========================================================================
-
+    # ----------------- Remote Direct Edit -----------------
     def edit_selected_remote_file(self):
-        """
-        Triggers Remote Direct-Edit:
-        1. Downloads file into /tmp/winscp-linux-cache/<session_id>/<remote_path>
-        2. Launches default Linux editor (xdg-open or $EDITOR)
-        3. Attaches inotify watcher via watchdog
-        4. Auto-uploads on save
-        """
         if not self.sftp_client.is_connected:
             QMessageBox.warning(self, "Not Connected", "Please connect to a remote server first.")
             return
@@ -918,84 +748,57 @@ class MainWindow(QMainWindow):
             return
 
         remote_path = data["path"]
-        self.lbl_status.setText(f"Opening remote file for editing: {remote_path}...")
+        self.status_message.emit(f"Opening remote file for editing: {remote_path}...")
 
         try:
-            cache_path = self.sync_engine.start_edit_session(
+            self.sync_engine.start_edit_session(
                 sftp_client=self.sftp_client,
                 session_id=self.session_id,
                 remote_path=remote_path,
             )
-            self.status_bar.showMessage(f"Opened {remote_path} in local editor. Auto-sync active.", 5000)
+            self.status_message.emit(f"Opened {remote_path} in local editor. Auto-sync active.")
         except Exception as exc:
             QMessageBox.critical(self, "Edit Failed", f"Could not open file for editing: {exc}")
 
-    def _on_sync_started(self, remote_path: str, local_path: str):
-        self.lbl_status.setText(f"Auto-uploading saved changes to {remote_path}...")
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.show()
-
     def _on_sync_succeeded(self, remote_path: str, local_path: str):
-        self.progress_bar.hide()
-        self.status_bar.showMessage(f"✔ File uploaded successfully: {remote_path}", 4000)
-        # Refresh remote table if file is in current directory
+        self.status_message.emit(f"✔ File uploaded successfully: {remote_path}")
         if str(Path(remote_path).parent) == self.txt_remote_path.text().rstrip("/"):
             self._load_remote_directory(self.txt_remote_path.text())
 
-    def _on_sync_failed(self, remote_path: str, error_msg: str):
-        self.progress_bar.hide()
-        self.status_bar.showMessage(f"❌ Auto-sync failed for {remote_path}: {error_msg}", 8000)
-
-    # =========================================================================
-    # =========================================================================
-    # Transfers: Upload & Download (Supports both Files & Folders)
-    # =========================================================================
-
+    # ----------------- Transfers & Drag-Drop -----------------
     def _execute_batch_transfer(self, transfers: List[dict], refresh_pane: str):
-        """Executes a batch of file/folder upload or download transfers."""
         if not transfers:
             return
 
         total_items = len(transfers)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.show()
+        self.progress_changed.emit(0)
 
         worker = SFTPBatchTransferWorker(self.sftp_client, transfers)
         self._active_worker = worker
 
         def _on_started(name: str, idx: int, total: int):
-            self.lbl_status.setText(f"Transferring ({idx}/{total}): {name}...")
-            self.progress_bar.setValue(int(((idx - 1) / total) * 100))
-
-        def _on_prog(transferred: int, total: int):
-            if total > 0:
-                pass
+            self.status_message.emit(f"Transferring ({idx}/{total}): {name}...")
+            self.progress_changed.emit(int(((idx - 1) / total) * 100))
 
         def _on_finish(count: int):
-            self.progress_bar.hide()
-            self.status_bar.showMessage(f"✔ Completed transfer of {count} item(s) successfully.", 5000)
+            self.progress_changed.emit(100)
+            self.status_message.emit(f"✔ Completed transfer of {count} item(s) successfully.")
             if refresh_pane == "remote":
                 self._load_remote_directory(self.txt_remote_path.text())
             else:
                 self._load_local_directory(self.txt_local_path.text())
 
         def _on_fail(err: str):
-            self.progress_bar.hide()
-            self.lbl_status.setText("Transfer failed.")
+            self.progress_changed.emit(0)
+            self.status_message.emit("Transfer failed.")
             QMessageBox.critical(self, "Transfer Error", f"Transfer failed:\n{err}")
 
         worker.item_started.connect(_on_started)
-        worker.progress.connect(_on_prog)
         worker.finished.connect(_on_finish)
         worker.failed.connect(_on_fail)
         worker.start()
 
     def _handle_items_dropped(self, drop_data: dict):
-        """
-        Handles Drag & Drop events between local, remote, and external file sources.
-        Supports both files and entire folders.
-        """
         source_pane = drop_data["source_pane"]
         target_pane = drop_data["target_pane"]
         target_folder = drop_data["target_folder"]
@@ -1004,16 +807,12 @@ class MainWindow(QMainWindow):
         if not items:
             return
 
-        # ---------------------------------------------------------------------
-        # Case A: Dropped onto Remote Pane (Upload)
-        # ---------------------------------------------------------------------
         if target_pane == "remote":
             if not self.sftp_client.is_connected:
                 QMessageBox.warning(self, "Not Connected", "Please connect to a remote server before uploading.")
                 return
 
             if source_pane == "remote":
-                # Remote-to-Remote move into a subfolder
                 if target_folder == self.txt_remote_path.text().rstrip("/"):
                     return
                 reply = QMessageBox.question(
@@ -1033,7 +832,6 @@ class MainWindow(QMainWindow):
                     self._load_remote_directory(self.txt_remote_path.text())
                 return
 
-            # From Local or External -> Upload to Remote
             transfers = []
             for it in items:
                 src_p = it["path"]
@@ -1063,12 +861,8 @@ class MainWindow(QMainWindow):
 
             self._execute_batch_transfer(transfers, refresh_pane="remote")
 
-        # ---------------------------------------------------------------------
-        # Case B: Dropped onto Local Pane (Download or Local Copy)
-        # ---------------------------------------------------------------------
         elif target_pane == "local":
             if source_pane == "remote":
-                # From Remote -> Download to Local
                 if not self.sftp_client.is_connected:
                     return
 
@@ -1100,9 +894,7 @@ class MainWindow(QMainWindow):
                     return
 
                 self._execute_batch_transfer(transfers, refresh_pane="local")
-
             else:
-                # Local or External dropped onto Local folder
                 target_path = Path(target_folder)
                 for it in items:
                     src_p = Path(it["path"])
@@ -1119,7 +911,6 @@ class MainWindow(QMainWindow):
                 self._load_local_directory(self.txt_local_path.text())
 
     def upload_selected(self):
-        """Uploads selected local file(s) and folder(s) to current remote directory."""
         if not self.sftp_client.is_connected:
             QMessageBox.warning(self, "Not Connected", "Connect to a remote server before uploading.")
             return
@@ -1170,7 +961,6 @@ class MainWindow(QMainWindow):
         self._execute_batch_transfer(transfers, refresh_pane="remote")
 
     def download_selected(self):
-        """Downloads selected remote file(s) and folder(s) to current local directory."""
         if not self.sftp_client.is_connected:
             return
 
@@ -1219,12 +1009,7 @@ class MainWindow(QMainWindow):
 
         self._execute_batch_transfer(transfers, refresh_pane="local")
 
-    # =========================================================================
-    # File Operations: Chmod, Rename, Delete, Mkdir
-    # =========================================================================
-
     def chmod_selected(self):
-        """Opens permission dialog for remote or local file."""
         if self.table_remote.hasFocus() or (self.sftp_client.is_connected and self.table_remote.selectedItems()):
             selected = self.table_remote.selectedItems()
             if not selected:
@@ -1245,12 +1030,13 @@ class MainWindow(QMainWindow):
                     success_msg=f"Permissions updated to {oct(new_mode)[2:]} for {data['name']}",
                 )
                 self._active_worker = worker
-                worker.finished.connect(lambda msg: (self.status_bar.showMessage(msg, 3000), self._load_remote_directory(self.txt_remote_path.text())))
+                worker.finished.connect(
+                    lambda msg: (self.status_message.emit(msg), self._load_remote_directory(self.txt_remote_path.text()))
+                )
                 worker.failed.connect(lambda err: QMessageBox.critical(self, "Chmod Error", err))
                 worker.start()
 
     def delete_selected(self):
-        """Deletes selected item in focused pane."""
         if self.table_remote.hasFocus() and self.sftp_client.is_connected:
             selected = self.table_remote.selectedItems()
             if not selected:
@@ -1280,7 +1066,9 @@ class MainWindow(QMainWindow):
 
             worker = SFTPActionWorker(_del, f"Deleted {data['name']}")
             self._active_worker = worker
-            worker.finished.connect(lambda msg: (self.status_bar.showMessage(msg, 3000), self._load_remote_directory(self.txt_remote_path.text())))
+            worker.finished.connect(
+                lambda msg: (self.status_message.emit(msg), self._load_remote_directory(self.txt_remote_path.text()))
+            )
             worker.failed.connect(lambda err: QMessageBox.critical(self, "Delete Failed", err))
             worker.start()
         else:
@@ -1310,7 +1098,6 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Error", f"Could not delete: {exc}")
 
     def create_directory(self):
-        """Creates a new directory in active pane."""
         name, ok = QInputDialog.getText(self, "New Folder", "Directory Name:")
         if not ok or not name.strip():
             return
@@ -1323,7 +1110,9 @@ class MainWindow(QMainWindow):
                 f"Created directory {clean_name}",
             )
             self._active_worker = worker
-            worker.finished.connect(lambda msg: (self.status_bar.showMessage(msg, 3000), self._load_remote_directory(self.txt_remote_path.text())))
+            worker.finished.connect(
+                lambda msg: (self.status_message.emit(msg), self._load_remote_directory(self.txt_remote_path.text()))
+            )
             worker.failed.connect(lambda err: QMessageBox.critical(self, "Create Directory Failed", err))
             worker.start()
         else:
@@ -1339,10 +1128,7 @@ class MainWindow(QMainWindow):
         if self.sftp_client.is_connected:
             self._load_remote_directory(self.txt_remote_path.text())
 
-    # =========================================================================
-    # Helpers & Context Menus
-    # =========================================================================
-
+    # ----------------- Helpers -----------------
     def _set_table_item(
         self,
         table: QTableWidget,
@@ -1411,6 +1197,403 @@ class MainWindow(QMainWindow):
 
         menu.exec(self.table_remote.mapToGlobal(pos))
 
+
+class MainWindow(QMainWindow):
+    """
+    WinSCP-Linux Commander Main Window with Multi-Session Tabbed Architecture.
+    Allows connecting to multiple SSH/SFTP servers simultaneously, one by one.
+    """
+
+    def __init__(self, session_store: Optional[SessionStore] = None):
+        super().__init__()
+        self.session_store = session_store or SessionStore()
+
+        self.setWindowTitle("WinSCP-Linux")
+        self.resize(1180, 780)
+
+        self._setup_ui()
+        self._setup_menus()
+        self._setup_toolbars()
+        self._setup_statusbar()
+
+        # Create initial default session tab
+        self.create_session_tab()
+
+    def _setup_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Tab widget for multi-session support
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setTabsClosable(True)
+        self.tab_widget.setMovable(True)
+        self.tab_widget.setDocumentMode(True)
+
+        # Plus button in tab corner for quick connection to new SSH servers
+        self.btn_new_tab = QPushButton(" ➕ ")
+        self.btn_new_tab.setToolTip("Connect to another SSH/SFTP server (New Tab)...")
+        self.btn_new_tab.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 2px 8px; border: none; background: #333333; color: #4ec9b0; }"
+            "QPushButton:hover { background: #3e3e42; color: #ffffff; }"
+        )
+        self.btn_new_tab.clicked.connect(self.open_session_dialog)
+        self.tab_widget.setCornerWidget(self.btn_new_tab, Qt.Corner.TopRightCorner)
+
+        self.tab_widget.tabCloseRequested.connect(self._close_session_tab)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+
+        main_layout.addWidget(self.tab_widget)
+
+    def _setup_menus(self):
+        menubar = self.menuBar()
+
+        # Session Menu
+        m_session = menubar.addMenu("&Session")
+        act_login = m_session.addAction("New Session (Connect)...")
+        act_login.setShortcut("Ctrl+N")
+        act_login.triggered.connect(self.open_session_dialog)
+
+        act_close_tab = m_session.addAction("Close Active Tab")
+        act_close_tab.setShortcut("Ctrl+W")
+        act_close_tab.triggered.connect(lambda: self._close_session_tab(self.tab_widget.currentIndex()))
+
+        act_disconnect = m_session.addAction("Disconnect Active Session")
+        act_disconnect.setShortcut("Ctrl+D")
+        act_disconnect.triggered.connect(self.disconnect_session)
+
+        m_session.addSeparator()
+        act_export = m_session.addAction("Export / Cloud Backup...")
+        act_export.triggered.connect(self.open_export_dialog)
+
+        m_session.addSeparator()
+        act_quit = m_session.addAction("Exit")
+        act_quit.setShortcut("Ctrl+Q")
+        act_quit.triggered.connect(self.close)
+
+        # Commands Menu
+        m_cmd = menubar.addMenu("&Commands")
+        act_upload = m_cmd.addAction("Upload (F5)")
+        act_upload.setShortcut("F5")
+        act_upload.triggered.connect(self.upload_selected)
+
+        act_download = m_cmd.addAction("Download (F5)")
+        act_download.triggered.connect(self.download_selected)
+
+        act_edit = m_cmd.addAction("Edit Remote File (F4)")
+        act_edit.setShortcut("F4")
+        act_edit.triggered.connect(self.edit_selected_remote_file)
+
+        act_del = m_cmd.addAction("Delete (F8)")
+        act_del.setShortcut("F8")
+        act_del.triggered.connect(self.delete_selected)
+
+        act_mkdir = m_cmd.addAction("New Directory (F7)")
+        act_mkdir.setShortcut("F7")
+        act_mkdir.triggered.connect(self.create_directory)
+
+        act_chmod = m_cmd.addAction("Properties / Chmod (F9)")
+        act_chmod.setShortcut("F9")
+        act_chmod.triggered.connect(self.chmod_selected)
+
+        m_cmd.addSeparator()
+        act_term = m_cmd.addAction("Open Terminal (Ctrl+T)")
+        act_term.setShortcut("Ctrl+T")
+        act_term.triggered.connect(self.open_terminal)
+
+        # View Menu
+        m_view = menubar.addMenu("&View")
+        act_refresh = m_view.addAction("Refresh (Ctrl+R)")
+        act_refresh.setShortcut("Ctrl+R")
+        act_refresh.triggered.connect(self.refresh_both)
+
+        act_toggle_term = m_view.addAction("Toggle Terminal")
+        act_toggle_term.triggered.connect(self._toggle_terminal)
+
+        # Help Menu
+        m_help = menubar.addMenu("&Help")
+        act_about = m_help.addAction("About WinSCP-Linux")
+        act_about.triggered.connect(self._show_about)
+
+    def _setup_toolbars(self):
+        toolbar = QToolBar("Main Operations")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        self.tb_connect = toolbar.addAction("🔌 Connect / New Tab")
+        self.tb_connect.triggered.connect(self.open_session_dialog)
+
+        self.tb_disconnect = toolbar.addAction("⏹ Disconnect")
+        self.tb_disconnect.setEnabled(False)
+        self.tb_disconnect.triggered.connect(self.disconnect_session)
+
+        toolbar.addSeparator()
+
+        self.tb_refresh = toolbar.addAction("🔄 Refresh")
+        self.tb_refresh.triggered.connect(self.refresh_both)
+
+        self.tb_upload = toolbar.addAction("⬆ Upload")
+        self.tb_upload.triggered.connect(self.upload_selected)
+
+        self.tb_download = toolbar.addAction("⬇ Download")
+        self.tb_download.triggered.connect(self.download_selected)
+
+        self.tb_edit = toolbar.addAction("✏ Edit")
+        self.tb_edit.triggered.connect(self.edit_selected_remote_file)
+
+        self.tb_chmod = toolbar.addAction("🔒 Chmod")
+        self.tb_chmod.triggered.connect(self.chmod_selected)
+
+        self.tb_delete = toolbar.addAction("🗑 Delete")
+        self.tb_delete.triggered.connect(self.delete_selected)
+
+        self.tb_mkdir = toolbar.addAction("📁 New Folder")
+        self.tb_mkdir.triggered.connect(self.create_directory)
+
+        toolbar.addSeparator()
+
+        self.tb_term = toolbar.addAction("💻 Terminal")
+        self.tb_term.triggered.connect(self.open_terminal)
+
+        self.tb_cloud = toolbar.addAction("☁ Cloud Backup")
+        self.tb_cloud.triggered.connect(self.open_export_dialog)
+
+    def _setup_statusbar(self):
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+
+        self.lbl_status = QLabel("Ready")
+        self.status_bar.addWidget(self.lbl_status, 1)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedWidth(200)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.hide()
+        self.status_bar.addPermanentWidget(self.progress_bar)
+
+        self.lbl_session = QLabel("🔴 Not Connected")
+        self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
+        self.status_bar.addPermanentWidget(self.lbl_session)
+
+    # =========================================================================
+    # Multi-Session Tab Management
+    # =========================================================================
+
+    def active_session_view(self) -> Optional[SessionCommanderView]:
+        """Returns the currently active session tab widget."""
+        widget = self.tab_widget.currentWidget()
+        return widget if isinstance(widget, SessionCommanderView) else None
+
+    def create_session_tab(self, session: Optional[SessionConfig] = None) -> SessionCommanderView:
+        """Creates a new independent session commander tab."""
+        view = SessionCommanderView(self)
+        title = f"🖥 {session.name}" if session else f"🖥 Session {self.tab_widget.count() + 1}"
+        idx = self.tab_widget.addTab(view, title)
+        self.tab_widget.setCurrentIndex(idx)
+
+        # Wire view signals
+        view.status_message.connect(self._on_view_status_message)
+        view.progress_changed.connect(self._on_view_progress_changed)
+        view.session_connected.connect(lambda t, info: self._on_view_connected(view, t, info))
+        view.session_disconnected.connect(lambda: self._on_view_disconnected(view))
+
+        if session:
+            view.connect_to_session(session)
+
+        return view
+
+    def _close_session_tab(self, index: int):
+        """Closes a session tab and disconnects its SSH/SFTP connection."""
+        widget = self.tab_widget.widget(index)
+        if isinstance(widget, SessionCommanderView):
+            if widget.sftp_client.is_connected:
+                s_name = widget.current_session.name if widget.current_session else "this session"
+                reply = QMessageBox.question(
+                    self,
+                    "Close Session Tab",
+                    f"Disconnect and close session '{s_name}'?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+            widget.cleanup()
+
+        self.tab_widget.removeTab(index)
+
+        # If all tabs closed, create an empty one
+        if self.tab_widget.count() == 0:
+            self.create_session_tab()
+
+    def _on_tab_changed(self, index: int):
+        """Updates toolbar and status bar to reflect the newly active tab."""
+        view = self.active_session_view()
+        if not view:
+            self.lbl_session.setText("🔴 Not Connected")
+            self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
+            self.tb_disconnect.setEnabled(False)
+            return
+
+        if view.sftp_client.is_connected and view.current_session:
+            s = view.current_session
+            tab_info = f" [Tab {index+1}/{self.tab_widget.count()}]"
+            self.lbl_session.setText(f"🟢 {s.username}@{s.host}:{s.port}{tab_info}")
+            self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #4ec9b0;")
+            self.tb_disconnect.setEnabled(True)
+        else:
+            tab_info = f" [Tab {index+1}/{self.tab_widget.count()}]"
+            self.lbl_session.setText(f"🔴 Not Connected{tab_info}")
+            self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
+            self.tb_disconnect.setEnabled(False)
+
+    def _on_view_status_message(self, msg: str):
+        self.lbl_status.setText(msg)
+
+    def _on_view_progress_changed(self, val: int):
+        if val < 0:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.show()
+        elif val >= 100:
+            self.progress_bar.setValue(100)
+            self.progress_bar.hide()
+        elif val == 0:
+            self.progress_bar.hide()
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(val)
+            self.progress_bar.show()
+
+    def _on_view_connected(self, view: SessionCommanderView, title: str, info: str):
+        idx = self.tab_widget.indexOf(view)
+        if idx >= 0:
+            self.tab_widget.setTabText(idx, f"🖥 {title}")
+        if self.active_session_view() == view:
+            tab_info = f" [Tab {idx+1}/{self.tab_widget.count()}]"
+            self.lbl_session.setText(f"🟢 {info}{tab_info}")
+            self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #4ec9b0;")
+            self.tb_disconnect.setEnabled(True)
+
+    def _on_view_disconnected(self, view: SessionCommanderView):
+        idx = self.tab_widget.indexOf(view)
+        if idx >= 0:
+            self.tab_widget.setTabText(idx, f"🖥 Disconnected")
+        if self.active_session_view() == view:
+            tab_info = f" [Tab {idx+1}/{self.tab_widget.count()}]"
+            self.lbl_session.setText(f"🔴 Not Connected{tab_info}")
+            self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
+            self.tb_disconnect.setEnabled(False)
+
+    # =========================================================================
+    # Session Connection Actions
+    # =========================================================================
+
+    def open_session_dialog(self):
+        dlg = SessionDialog(self.session_store, self)
+        dlg.login_requested.connect(self.connect_to_session)
+        dlg.export_requested.connect(self.open_export_dialog)
+        dlg.exec()
+
+    def connect_to_session(self, session: SessionConfig):
+        """
+        Connects to a session.
+        If the active tab is not currently connected, connects within it.
+        Otherwise, automatically opens a NEW tab for this SSH connection,
+        allowing users to connect to multiple SSH servers one by one!
+        """
+        active = self.active_session_view()
+        if active and not active.sftp_client.is_connected and not active.current_session:
+            idx = self.tab_widget.currentIndex()
+            self.tab_widget.setTabText(idx, f"🖥 {session.name}")
+            active.connect_to_session(session)
+        else:
+            # Open in a new session tab
+            self.create_session_tab(session)
+
+    def disconnect_session(self):
+        if view := self.active_session_view():
+            view.disconnect_session()
+
+    def open_export_dialog(self):
+        dlg = ExportDialog(self.session_store, self)
+        dlg.sessions_updated.connect(lambda: self.status_bar.showMessage("Sessions synchronized.", 3000))
+        dlg.exec()
+
+    # =========================================================================
+    # Active Session Forwarding Operations
+    # =========================================================================
+
+    def upload_selected(self):
+        if view := self.active_session_view():
+            view.upload_selected()
+
+    def download_selected(self):
+        if view := self.active_session_view():
+            view.download_selected()
+
+    def edit_selected_remote_file(self):
+        if view := self.active_session_view():
+            view.edit_selected_remote_file()
+
+    def chmod_selected(self):
+        if view := self.active_session_view():
+            view.chmod_selected()
+
+    def delete_selected(self):
+        if view := self.active_session_view():
+            view.delete_selected()
+
+    def create_directory(self):
+        if view := self.active_session_view():
+            view.create_directory()
+
+    def open_terminal(self):
+        if view := self.active_session_view():
+            view.open_terminal()
+
+    def _toggle_terminal(self):
+        if view := self.active_session_view():
+            view._toggle_terminal()
+
+    def refresh_both(self):
+        if view := self.active_session_view():
+            view.refresh_both()
+
+    # =========================================================================
+    # Compatibility Properties for Direct Access & Existing Tests
+    # =========================================================================
+
+    @property
+    def table_local(self):
+        view = self.active_session_view()
+        return view.table_local if view else None
+
+    @property
+    def table_remote(self):
+        view = self.active_session_view()
+        return view.table_remote if view else None
+
+    @property
+    def sftp_client(self):
+        view = self.active_session_view()
+        return view.sftp_client if view else None
+
+    @property
+    def current_session(self):
+        view = self.active_session_view()
+        return view.current_session if view else None
+
+    @property
+    def terminal_widget(self):
+        view = self.active_session_view()
+        return view.terminal_widget if view else None
+
+    # =========================================================================
+    # Window Lifecycle & About
+    # =========================================================================
+
     def _show_about(self):
         QMessageBox.about(
             self,
@@ -1418,9 +1601,10 @@ class MainWindow(QMainWindow):
             "<h3>WinSCP-Linux</h3>"
             "<p>A native Linux alternative to WinSCP featuring:</p>"
             "<ul>"
-            "<li>Dual-Pane Commander UI (Local & Remote SFTP)</li>"
+            "<li>Multi-Session Tabbed SSH / SFTP Commander</li>"
+            "<li>Bidirectional Drag & Drop Transfers for Files and Folders</li>"
             "<li>Live Remote Direct-Edit with Watchdog (inotify) Auto-Sync</li>"
-            "<li>Embedded Interactive SSH Shell Terminal</li>"
+            "<li>Embedded Interactive SSH Shell Terminal per Connection</li>"
             "<li>WinSCP-Compatible .ini Export & Import</li>"
             "<li>AES-256-GCM + PBKDF2HMAC (600,000 rounds) Encrypted Cloud Sharing</li>"
             "</ul>"
@@ -1428,8 +1612,9 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event):
-        """Clean up on exit."""
-        self.sftp_client.disconnect()
-        self.ssh_shell.close()
-        self.sync_engine.cleanup_all()
+        """Clean up all active sessions on exit."""
+        for i in range(self.tab_widget.count()):
+            widget = self.tab_widget.widget(i)
+            if isinstance(widget, SessionCommanderView):
+                widget.cleanup()
         super().closeEvent(event)
