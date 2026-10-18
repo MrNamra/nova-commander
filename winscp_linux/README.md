@@ -8,7 +8,15 @@ WinSCP-Linux mirrors the classic dual-pane commander interface, delivers live re
 
 ## 🌟 Key Features
 
-### 1. Dual-Pane Commander UI
+### 1. Multi-Session Tabbed Architecture
+- **Simultaneous SSH Connections:** Connect to multiple SSH/SFTP servers one by one. Each session runs independently in its own tab.
+- **Dedicated Environment per Server:** Each tab maintains its own dual-pane commander, remote directory navigation, auto-sync editor watcher, and embedded interactive SSH terminal.
+- **Quick Tab Actions:** 
+  - Add new connection tab via **➕** corner button or `Ctrl+N`.
+  - Close active session tab via `✕` button or `Ctrl+W`.
+  - Switch smoothly between active servers without disconnecting.
+
+### 2. Dual-Pane Commander UI
 - **Dual Filesystem Navigation:** Local Linux filesystem on the left and remote SFTP server on the right.
 - **Classic Commander Layout:** Columns for Name, Size, Permissions (`0755` / `rwxr-xr-x`), and Last Modified date.
 - **Navigation Controls:** Editable path bars with instant "Go" and parent directory (`..`) navigation.
