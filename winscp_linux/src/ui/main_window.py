@@ -81,6 +81,7 @@ from ..core.sftp_client import (
 from ..core.editor_manager import editor_preferences, launch_external_editor
 from ..core.ssh_client import SSHShellClient
 from ..core.sync_engine import SyncEngine
+from ..core.terminal_launcher import launch_system_terminal
 from .export_dialog import ExportDialog
 from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog, SimpleOpenPromptDialog
 from .session_dialog import SessionDialog
@@ -666,27 +667,44 @@ class SessionCommanderView(QWidget):
         passphrase = getattr(session, "passphrase", "") if session else ""
         session_name = session.name if session else (f"{username}@{host}" if host else "SSH Terminal")
 
-        term_win = SSHTerminalWindow(
-            ssh_client=self.sftp_client.ssh_client,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            private_key=private_key,
-            passphrase=passphrase,
-            session_name=session_name,
-            parent=None,
-        )
+        remote_dir = self.txt_remote_path.text() if self.txt_remote_path.text() != "/" else (session.remote_dir if session else "")
 
-        if not hasattr(self, "_term_windows"):
-            self._term_windows = []
-        self._term_windows.append(term_win)
-        term_win.destroyed.connect(lambda: self._term_windows.remove(term_win) if term_win in self._term_windows else None)
+        try:
+            launch_system_terminal(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                private_key=private_key,
+                remote_dir=remote_dir,
+                session_name=session_name,
+            )
+            self.status_message.emit(f"Launched system terminal connected to {username}@{host}:{port} (Ctrl+P).")
+        except Exception as exc:
+            # Fallback to internal terminal window if native OS terminal is unavailable
+            try:
+                term_win = SSHTerminalWindow(
+                    ssh_client=self.sftp_client.ssh_client,
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    private_key=private_key,
+                    passphrase=passphrase,
+                    session_name=session_name,
+                    parent=None,
+                )
+                if not hasattr(self, "_term_windows"):
+                    self._term_windows = []
+                self._term_windows.append(term_win)
+                term_win.destroyed.connect(lambda: self._term_windows.remove(term_win) if term_win in self._term_windows else None)
 
-        term_win.show()
-        term_win.raise_()
-        term_win.activateWindow()
-        self.status_message.emit("Opened SSH terminal in new window (Ctrl+P).")
+                term_win.show()
+                term_win.raise_()
+                term_win.activateWindow()
+                self.status_message.emit("Opened SSH terminal window (Ctrl+P).")
+            except Exception as inner_exc:
+                QMessageBox.critical(self, "Terminal Launch Error", f"Could not launch terminal:\n{exc}\n{inner_exc}")
 
     # ----------------- Local Pane -----------------
     def _load_local_directory(self, dir_path: str):
@@ -1533,6 +1551,9 @@ class SessionCommanderView(QWidget):
         act_mkdir.triggered.connect(self.create_directory)
 
         menu.addSeparator()
+        act_sys_term = menu.addAction("🖥 Open in System Terminal (Ctrl+P)")
+        act_sys_term.triggered.connect(self.open_terminal_window)
+
         act_ref = menu.addAction("🔄 Refresh")
         act_ref.triggered.connect(lambda: self._load_remote_directory(self.txt_remote_path.text()))
 
@@ -1662,7 +1683,7 @@ class MainWindow(QMainWindow):
         act_term.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_term.triggered.connect(self.open_terminal)
 
-        act_term_win = m_cmd.addAction("Open Terminal in New Window (Ctrl+P)")
+        act_term_win = m_cmd.addAction("Open in System Terminal (Ctrl+P)")
         act_term_win.setShortcut(QKeySequence("Ctrl+P"))
         act_term_win.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_term_win.triggered.connect(self.open_terminal_window)
@@ -1728,7 +1749,8 @@ class MainWindow(QMainWindow):
         self.tb_term = toolbar.addAction("💻 Terminal (Ctrl+T)")
         self.tb_term.triggered.connect(self.open_terminal)
 
-        self.tb_term_win = toolbar.addAction("🖥 Terminal Window (Ctrl+P)")
+        self.tb_term_win = toolbar.addAction("🖥 System Terminal (Ctrl+P)")
+        self.tb_term_win.setToolTip("Open native OS terminal connected via SSH (Ctrl+P)")
         self.tb_term_win.triggered.connect(self.open_terminal_window)
 
         # Cloud backup hidden for now per user request

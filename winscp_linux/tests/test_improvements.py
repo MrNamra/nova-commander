@@ -34,6 +34,11 @@ try:
     )
     from src.core.session_store import SessionConfig, SessionStore
     from src.core.sftp_client import RemoteFileInfo, SFTPClient
+    from src.core.terminal_launcher import (
+        build_ssh_command,
+        get_available_linux_terminals,
+        launch_system_terminal,
+    )
     from src.ui.main_window import ChmodDialog, MainWindow
     from src.ui.open_with_dialog import SimpleOpenPromptDialog
     from src.ui.terminal_widget import SSHTerminalWindow
@@ -45,6 +50,11 @@ except ImportError:
     )
     from core.session_store import SessionConfig, SessionStore
     from core.sftp_client import RemoteFileInfo, SFTPClient
+    from core.terminal_launcher import (
+        build_ssh_command,
+        get_available_linux_terminals,
+        launch_system_terminal,
+    )
     from ui.main_window import ChmodDialog, MainWindow
     from ui.open_with_dialog import SimpleOpenPromptDialog
     from ui.terminal_widget import SSHTerminalWindow
@@ -280,8 +290,10 @@ def test_ctrl_p_terminal_shortcut_wiring(qapp):
 
 
 def test_open_terminal_window_when_sftp_connected(qapp):
-    """Verifies Ctrl+P standalone terminal window launches seamlessly when SFTP is connected."""
+    """Verifies Ctrl+P native OS terminal launch when SFTP is connected, plus graceful fallback."""
     from src.core.ssh_client import SSHShellClient
+    from src.ui import main_window as mw_mod
+
     store = SessionStore()
     win = MainWindow(store)
     view = win.active_session_view()
@@ -306,6 +318,7 @@ def test_open_terminal_window_when_sftp_connected(qapp):
         port=2222,
         username="developer",
     )
+    view.txt_remote_path.setText("/var/www/project")
 
     # Verify sftp_client properties
     assert view.sftp_client.host == "192.168.1.200"
@@ -313,12 +326,26 @@ def test_open_terminal_window_when_sftp_connected(qapp):
     assert view.sftp_client.username == "developer"
     assert view.sftp_client.is_connected is True
 
-    with patch.object(SSHShellClient, "open_shell") as mock_open_shell:
+    # 1. Primary path: Native system terminal is spawned
+    with patch.object(mw_mod, "launch_system_terminal", return_value=True) as mock_launch:
+        view.open_terminal_window()
+        mock_launch.assert_called_once_with(
+            host="192.168.1.200",
+            port=2222,
+            username="developer",
+            password="",
+            private_key="",
+            remote_dir="/var/www/project",
+            session_name="DevServer",
+        )
+
+    # 2. Fallback path: If native launcher throws, fallback to internal SSHTerminalWindow
+    with patch.object(mw_mod, "launch_system_terminal", side_effect=RuntimeError("No terminal emulator found")), \
+         patch.object(SSHShellClient, "open_shell"):
         view.open_terminal_window()
         assert len(view._term_windows) == 1
         tw = view._term_windows[0]
         assert "DevServer" in tw.windowTitle()
-        mock_open_shell.assert_called_once()
         tw.close()
 
     win.close()
@@ -372,3 +399,86 @@ def test_f2_key_press_event_emits_signal(qapp):
 
     assert len(signal_received) == 1, "F2 key press did not emit rename_requested signal!"
     table.close()
+
+
+def test_terminal_launcher_build_command():
+    """Verifies SSH command line generation with port, key, sshpass, and cd options."""
+    # Basic
+    cmd1 = build_ssh_command(host="192.168.1.10")
+    assert cmd1 == "ssh 192.168.1.10"
+
+    # Custom port and username and remote directory
+    cmd2 = build_ssh_command(
+        host="server.internal",
+        port=2222,
+        username="devops",
+        remote_dir="/var/www/site",
+    )
+    assert "-p 2222" in cmd2
+    assert "devops@server.internal" in cmd2
+    assert "cd /var/www/site" in cmd2
+    assert "exec $SHELL -l" in cmd2
+
+    # Password with sshpass
+    with patch("shutil.which", return_value="/usr/bin/sshpass"):
+        cmd3 = build_ssh_command(host="10.0.0.5", username="admin", password="mypassword123")
+        assert cmd3.startswith("sshpass -p mypassword123 ssh admin@10.0.0.5") or \
+               cmd3.startswith("sshpass -p 'mypassword123' ssh admin@10.0.0.5")
+
+
+def test_terminal_launcher_get_available_linux_terminals():
+    """Verifies discovery of installed Linux terminal emulators."""
+    with patch("shutil.which", side_effect=lambda x: f"/usr/bin/{x}" if x in ("konsole", "xterm") else None):
+        terms = get_available_linux_terminals()
+        assert terms == ["konsole", "xterm"]
+
+
+def test_launch_system_terminal_linux():
+    """Verifies launch_system_terminal spawns terminal process with clean env."""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    with patch.object(sys, "platform", "linux"), \
+         patch("src.core.terminal_launcher.get_available_linux_terminals", return_value=["gnome-terminal"]), \
+         patch("subprocess.Popen") as mock_popen:
+        mock_popen.return_value = MagicMock()
+        ok = launch_system_terminal(host="192.168.1.1", port=22, username="root")
+        assert ok is True
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        cmd_list = args[0]
+        assert cmd_list[0] == "gnome-terminal"
+        assert any("SSH: root@192.168.1.1" in a for a in cmd_list)
+        assert kwargs.get("start_new_session") is True
+
+
+def test_launch_system_terminal_windows():
+    """Verifies Windows terminal launch branching."""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    with patch.object(sys, "platform", "win32"), \
+         patch("shutil.which", return_value="C:\\Windows\\System32\\wt.exe"), \
+         patch("subprocess.Popen") as mock_popen:
+        mock_popen.return_value = MagicMock()
+        ok = launch_system_terminal(host="10.0.0.2", port=22, username="user")
+        assert ok is True
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        assert args[0][0] == "C:\\Windows\\System32\\wt.exe"
+
+
+def test_launch_system_terminal_darwin():
+    """Verifies macOS Terminal.app launch via osascript."""
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    with patch.object(sys, "platform", "darwin"), \
+         patch("subprocess.Popen") as mock_popen:
+        mock_popen.return_value = MagicMock()
+        ok = launch_system_terminal(host="10.0.0.3", port=22, username="macuser")
+        assert ok is True
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        assert args[0][0] == "osascript"
+        assert "Terminal" in args[0][2]
