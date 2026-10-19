@@ -130,14 +130,18 @@ winscp_linux/
 ## 🚀 Installation & Getting Started
 
 ### 1. Prerequisites
-Ensure Python 3.10+ is installed on your Linux system:
+Ensure Python 3.10+ and uv are installed installed on your Linux system:
 ```bash
 python3 --version
 ```
 
+```bash
+uv self version
+```
+
 ### 2. Install Dependencies
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 *(Or use `pip install -r winscp_linux/requirements.txt` from repository root)*
 
@@ -145,10 +149,10 @@ pip install -r requirements.txt
 Run either from root or from the package:
 ```bash
 # From repository root:
-python3 main.py
+uv run main.py
 
 # Or directly:
-python3 winscp_linux/src/main.py
+uv run winscp_linux/src/main.py
 ```
 
 ---
