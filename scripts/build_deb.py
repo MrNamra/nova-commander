@@ -316,7 +316,11 @@ Description: Professional native Linux SFTP & SSH Dual-Pane Commander
 
     # Copy to repo root for instant access
     shutil.copy2(output_deb_path, root_deb_path)
-    print(f"✔ Successfully created Debian package at:\n  - {output_deb_path}\n  - {root_deb_path}")
+    
+    # Legacy compatibility copy for winscp-linux naming
+    legacy_deb_root = repo_root / f"winscp-linux_{VERSION}_{ARCHITECTURE}.deb"
+    shutil.copy2(output_deb_path, legacy_deb_root)
+    print(f"✔ Successfully created Debian package at:\n  - {output_deb_path}\n  - {root_deb_path}\n  - {legacy_deb_root}")
 
     return output_deb_path
 

@@ -65,3 +65,66 @@ def test_multi_session_tabs_creation_and_switching(qapp, tmp_path):
     assert "Server_Gamma" in win.tab_widget.tabText(1)
 
     win.close()
+
+
+def test_ctrl_number_navigation_with_multiple_servers(qapp, tmp_path):
+    """Verifies navigating between multiple connected servers using Ctrl+1, Ctrl+2, Ctrl+3, etc."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+
+    store = SessionStore(storage_path=tmp_path / "sessions.ini")
+    win = MainWindow(store)
+
+    # Connect to 3 servers
+    s1 = SessionConfig(name="Server_Alpha", host="10.0.0.1", username="root")
+    s2 = SessionConfig(name="Server_Beta", host="10.0.0.2", username="ubuntu")
+    s3 = SessionConfig(name="Server_Gamma", host="10.0.0.3", username="admin")
+
+    win.connect_to_session(s1)
+    win.connect_to_session(s2)
+    win.connect_to_session(s3)
+
+    assert win.tab_widget.count() == 3
+
+    # Navigate via Ctrl+1 action
+    win.tab_actions[0].trigger()
+    assert win.tab_widget.currentIndex() == 0
+    assert "Server_Alpha" in win.tab_widget.tabText(0)
+
+    # Navigate via Ctrl+2 action
+    win.tab_actions[1].trigger()
+    assert win.tab_widget.currentIndex() == 1
+    assert "Server_Beta" in win.tab_widget.tabText(1)
+
+    # Navigate via Ctrl+3 action
+    win.tab_actions[2].trigger()
+    assert win.tab_widget.currentIndex() == 2
+    assert "Server_Gamma" in win.tab_widget.tabText(2)
+
+    # Navigate via direct keyPressEvent (Ctrl+1, Ctrl+2)
+    event_ctrl_1 = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_1, Qt.KeyboardModifier.ControlModifier)
+    win.keyPressEvent(event_ctrl_1)
+    assert win.tab_widget.currentIndex() == 0
+
+    event_ctrl_2 = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_2, Qt.KeyboardModifier.ControlModifier)
+    win.keyPressEvent(event_ctrl_2)
+    assert win.tab_widget.currentIndex() == 1
+
+    # Ctrl+9 jumps to last tab (tab index 2)
+    event_ctrl_9 = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_9, Qt.KeyboardModifier.ControlModifier)
+    win.keyPressEvent(event_ctrl_9)
+    assert win.tab_widget.currentIndex() == 2
+
+    # Circular navigation via next_session_tab and prev_session_tab
+    win.next_session_tab()
+    assert win.tab_widget.currentIndex() == 0
+    win.prev_session_tab()
+    assert win.tab_widget.currentIndex() == 2
+
+    # Tooltips have (Ctrl+X) hints
+    assert "(Ctrl+1)" in win.tab_widget.tabToolTip(0)
+    assert "(Ctrl+2)" in win.tab_widget.tabToolTip(1)
+    assert "(Ctrl+3)" in win.tab_widget.tabToolTip(2)
+
+    win.close()
+

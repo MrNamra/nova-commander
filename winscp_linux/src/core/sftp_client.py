@@ -121,6 +121,8 @@ class SFTPClient:
         private_key_path: str = "",
         passphrase: Optional[str] = None,
         timeout: float = 12.0,
+        keepalive_interval: int = 30,
+        compression: bool = False,
     ) -> None:
         """
         Establishes SSH transport and SFTP session.
@@ -167,6 +169,7 @@ class SFTPClient:
             "timeout": timeout,
             "look_for_keys": False,
             "allow_agent": False,
+            "compress": compression,
         }
 
         if pkey:
@@ -180,8 +183,8 @@ class SFTPClient:
         try:
             ssh.connect(**connect_kwargs)
             transport = ssh.get_transport()
-            if transport:
-                transport.set_keepalive(30)
+            if transport and keepalive_interval > 0:
+                transport.set_keepalive(keepalive_interval)
             sftp = ssh.open_sftp()
         except Exception as e:
             ssh.close()
@@ -429,6 +432,67 @@ class SFTPClient:
             raise RuntimeError("SFTP client is not connected.")
         return self._sftp.stat(remote_path)
 
+    def create_symlink(self, target: str, linkpath: str) -> None:
+        """Creates a symbolic link on the remote server."""
+        if not self.is_connected or not self._sftp:
+            raise RuntimeError("SFTP client is not connected.")
+        self._sftp.symlink(target, linkpath)
+
+    def readlink(self, linkpath: str) -> str:
+        """Reads destination of a symbolic link on the remote server."""
+        if not self.is_connected or not self._sftp:
+            raise RuntimeError("SFTP client is not connected.")
+        return self._sftp.readlink(linkpath)
+
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[int, str, str]:
+        """
+        Executes a remote shell command via SSH and returns (exit_status, stdout, stderr).
+        """
+        if not self.is_connected or not self._ssh:
+            raise RuntimeError("SSH client is not connected.")
+        stdin, stdout, stderr = self._ssh.exec_command(command, timeout=timeout)
+        exit_status = stdout.channel.recv_exit_status()
+        out_str = stdout.read().decode("utf-8", errors="replace")
+        err_str = stderr.read().decode("utf-8", errors="replace")
+        return exit_status, out_str, err_str
+
+    def calculate_checksum(self, remote_path: str, algorithm: str = "sha256") -> str:
+        """Calculates remote file checksum using remote hash utility or SFTP stream."""
+        algo = algorithm.lower()
+        cmd_map = {"sha256": "sha256sum", "md5": "md5sum", "sha1": "sha1sum"}
+        binary = cmd_map.get(algo, "sha256sum")
+
+        if self.is_connected and self._ssh:
+            try:
+                import shlex
+                code, out, _ = self.exec_command(f"{binary} {shlex.quote(remote_path)}", timeout=15)
+                if code == 0 and out:
+                    return out.split()[0].strip()
+            except Exception:
+                pass
+
+        # Fallback to streaming via SFTP
+        if not self.is_connected or not self._sftp:
+            raise RuntimeError("SFTP client is not connected.")
+
+        import hashlib
+        h = getattr(hashlib, algo, hashlib.sha256)()
+        with self._sftp.open(remote_path, "rb") as rf:
+            while chunk := rf.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def calculate_local_checksum(local_path: str, algorithm: str = "sha256") -> str:
+        """Calculates local file checksum."""
+        import hashlib
+        algo = algorithm.lower()
+        h = getattr(hashlib, algo, hashlib.sha256)()
+        with open(local_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
 
 # =============================================================================
 # QThread Workers to prevent UI freezing
@@ -451,6 +515,8 @@ class SFTPConnectWorker(QThread):
         private_key: str = "",
         passphrase: str = "",
         initial_remote_dir: str = "/",
+        keepalive_interval: int = 30,
+        compression: bool = False,
     ):
         super().__init__()
         self.sftp_client = sftp_client
@@ -461,6 +527,8 @@ class SFTPConnectWorker(QThread):
         self.private_key = private_key
         self.passphrase = passphrase
         self.initial_remote_dir = initial_remote_dir
+        self.keepalive_interval = keepalive_interval
+        self.compression = compression
 
     def run(self):
         try:
@@ -471,6 +539,8 @@ class SFTPConnectWorker(QThread):
                 password=self.password,
                 private_key_path=self.private_key,
                 passphrase=self.passphrase,
+                keepalive_interval=self.keepalive_interval,
+                compression=self.compression,
             )
             # Try setting initial directory if provided
             if self.initial_remote_dir and self.initial_remote_dir != "/":

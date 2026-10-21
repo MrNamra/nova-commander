@@ -28,6 +28,15 @@ class SessionConfig:
     local_dir: str = field(default_factory=lambda: os.path.expanduser("~"))
     folder: str = ""
     comment: str = ""
+    ping_interval: int = 30
+    compression: bool = False
+    utf8_encoding: str = "Auto"
+    sftp_server_cmd: str = ""
+    proxy_type: str = "None"
+    proxy_host: str = ""
+    proxy_port: int = 1080
+    proxy_user: str = ""
+    proxy_password: str = ""
 
     @property
     def full_path(self) -> str:
@@ -55,6 +64,15 @@ class SessionConfig:
             local_dir=data.get("local_dir", os.path.expanduser("~")),
             folder=data.get("folder", ""),
             comment=data.get("comment", ""),
+            ping_interval=int(data.get("ping_interval", 30)),
+            compression=bool(data.get("compression", False)),
+            utf8_encoding=str(data.get("utf8_encoding", "Auto")),
+            sftp_server_cmd=str(data.get("sftp_server_cmd", "")),
+            proxy_type=str(data.get("proxy_type", "None")),
+            proxy_host=str(data.get("proxy_host", "")),
+            proxy_port=int(data.get("proxy_port", 1080)),
+            proxy_user=str(data.get("proxy_user", "")),
+            proxy_password=str(data.get("proxy_password", "")),
         )
 
 
@@ -315,6 +333,25 @@ class SessionStore:
             comment = parser.get(section, "Comment", fallback="")
             passphrase = parser.get(section, "Passphrase", fallback="")
 
+            ping_val = parser.get(section, "PingInterval", fallback="30")
+            try:
+                ping_interval = int(ping_val)
+            except ValueError:
+                ping_interval = 30
+
+            compression = parser.get(section, "Compression", fallback="0") in ("1", "True", "true")
+            utf8_encoding = parser.get(section, "Utf", fallback="Auto")
+            sftp_server_cmd = parser.get(section, "SftpServer", fallback="")
+            proxy_type = parser.get(section, "ProxyMethod", fallback="None")
+            proxy_host = parser.get(section, "ProxyHost", fallback="")
+            proxy_port_val = parser.get(section, "ProxyPort", fallback="1080")
+            try:
+                proxy_port = int(proxy_port_val)
+            except ValueError:
+                proxy_port = 1080
+            proxy_user = parser.get(section, "ProxyUsername", fallback="")
+            proxy_password = parser.get(section, "ProxyPassword", fallback="")
+
             cfg = SessionConfig(
                 name=name,
                 host=host,
@@ -328,6 +365,15 @@ class SessionStore:
                 local_dir=local_dir if local_dir else os.path.expanduser("~"),
                 folder=folder,
                 comment=comment,
+                ping_interval=ping_interval,
+                compression=compression,
+                utf8_encoding=utf8_encoding,
+                sftp_server_cmd=sftp_server_cmd,
+                proxy_type=proxy_type,
+                proxy_host=proxy_host,
+                proxy_port=proxy_port,
+                proxy_user=proxy_user,
+                proxy_password=proxy_password,
             )
             parsed_sessions[cfg.full_path] = cfg
 
@@ -385,6 +431,24 @@ class SessionStore:
                 lines.append(f"LocalDirectory={s.local_dir}")
             if s.comment:
                 lines.append(f"Comment={s.comment}")
+            if s.ping_interval != 30:
+                lines.append(f"PingInterval={s.ping_interval}")
+            if s.compression:
+                lines.append("Compression=1")
+            if s.utf8_encoding and s.utf8_encoding != "Auto":
+                lines.append(f"Utf={s.utf8_encoding}")
+            if s.sftp_server_cmd:
+                lines.append(f"SftpServer={s.sftp_server_cmd}")
+            if s.proxy_type and s.proxy_type != "None":
+                lines.append(f"ProxyMethod={s.proxy_type}")
+                if s.proxy_host:
+                    lines.append(f"ProxyHost={s.proxy_host}")
+                if s.proxy_port:
+                    lines.append(f"ProxyPort={s.proxy_port}")
+                if s.proxy_user:
+                    lines.append(f"ProxyUsername={s.proxy_user}")
+                if s.proxy_password:
+                    lines.append(f"ProxyPassword={s.proxy_password}")
             lines.append("")
 
         return "\n".join(lines)

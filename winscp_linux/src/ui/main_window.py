@@ -18,6 +18,7 @@ import shutil
 import stat
 import subprocess
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import List, Optional
 
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -82,10 +84,19 @@ from ..core.editor_manager import editor_preferences, launch_external_editor
 from ..core.ssh_client import SSHShellClient
 from ..core.sync_engine import SyncEngine
 from ..core.terminal_launcher import launch_system_terminal
+from .bookmarks_dialog import BookmarksDialog, BookmarksStore
+from .custom_commands_dialog import CustomCommandsDialog
 from .export_dialog import ExportDialog
+from .find_files_dialog import FindFilesDialog
+from .function_bar import FunctionBarWidget
+from .generate_url_dialog import GenerateUrlDialog
 from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog, SimpleOpenPromptDialog
+from .properties_dialog import PropertiesDialog
 from .session_dialog import SessionDialog
+from .symlink_dialog import SymlinkDialog
+from .synchronize_dialog import SynchronizeDialog
 from .terminal_widget import SSHTerminalWindow
+from .transfer_options_dialog import TransferOptionsDialog
 
 
 class ChmodDialog(QDialog):
@@ -393,11 +404,43 @@ class CommanderTableWidget(QTableWidget):
         else:
             event.ignore()
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            row = self.rowAt(pos.y())
+            col = self.columnAt(pos.x())
+            if row >= 0:
+                self.cellDoubleClicked.emit(row, col)
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_F2:
             self.rename_requested.emit()
             event.accept()
             return
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            selected = self.selectedItems()
+            if selected:
+                row = selected[0].row()
+                self.cellDoubleClicked.emit(row, 0)
+                event.accept()
+                return
+        elif event.key() == Qt.Key.Key_Backspace:
+            # WinSCP Backspace navigates to parent directory [..]
+            view = self.parent()
+            while view and not hasattr(view, "_on_local_up") and not hasattr(view, "_on_remote_up"):
+                view = view.parent()
+            if view:
+                if self.pane_type == "local" and hasattr(view, "_on_local_up"):
+                    view._on_local_up()
+                    event.accept()
+                    return
+                elif self.pane_type == "remote" and hasattr(view, "_on_remote_up"):
+                    view._on_remote_up()
+                    event.accept()
+                    return
         super().keyPressEvent(event)
 
 
@@ -436,7 +479,7 @@ class SessionCommanderView(QWidget):
 
         # Dual-Pane layout
         self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(self.h_splitter)
+        layout.addWidget(self.h_splitter, 1)
 
         # === Left Panel: Local Filesystem ===
         left_widget = QWidget()
@@ -444,22 +487,73 @@ class SessionCommanderView(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(2)
 
+        # WinSCP Local Drive / Quick Jump Bar
+        local_drive_bar = QHBoxLayout()
+        local_drive_bar.setSpacing(3)
+        self.cmb_local_drives = QComboBox()
+        self.cmb_local_drives.setMinimumWidth(160)
+        self.cmb_local_drives.setFixedHeight(30)
+        self.cmb_local_drives.setStyleSheet("QComboBox { font-size: 12px; font-weight: 500; padding: 2px 6px; }")
+        self.cmb_local_drives.addItem("📁 / (Root)", "/")
+        self.cmb_local_drives.addItem(f"🏠 ~ ({Path.home().name})", str(Path.home()))
+        for p in ["/tmp", "/var/log", "/etc", "/opt", "/usr"]:
+            if os.path.exists(p):
+                self.cmb_local_drives.addItem(f"📁 {p}", p)
+        self.cmb_local_drives.setCurrentIndex(1)
+        self.cmb_local_drives.activated.connect(lambda idx: self._load_local_directory(self.cmb_local_drives.currentData()))
+
+        self.btn_local_up = QPushButton("⬆")
+        self.btn_local_up.setToolTip("Go to parent directory [..] (Backspace)")
+        self.btn_local_home = QPushButton("🏠")
+        self.btn_local_home.setToolTip("Go to Home directory (~)")
+        self.btn_local_root = QPushButton("/")
+        self.btn_local_root.setToolTip("Go to Root directory (/)")
+        self.btn_local_bmark = QPushButton("⭐")
+        self.btn_local_bmark.setToolTip("Directory Bookmarks (Ctrl+D)")
+        self.btn_local_refresh = QPushButton("🔄")
+        self.btn_local_refresh.setToolTip("Refresh local directory (Ctrl+R)")
+
+        for b in [self.btn_local_up, self.btn_local_home, self.btn_local_root, self.btn_local_bmark, self.btn_local_refresh]:
+            b.setFixedSize(36, 30)
+            b.setStyleSheet("QPushButton { font-size: 16px; font-weight: bold; padding: 0px; }")
+
+        local_drive_bar.addWidget(self.cmb_local_drives, 1)
+        local_drive_bar.addWidget(self.btn_local_up)
+        local_drive_bar.addWidget(self.btn_local_home)
+        local_drive_bar.addWidget(self.btn_local_root)
+        local_drive_bar.addWidget(self.btn_local_bmark)
+        local_drive_bar.addWidget(self.btn_local_refresh)
+        left_layout.addLayout(local_drive_bar)
+
+        # Local Path bar
         local_header = QHBoxLayout()
+        local_header.setSpacing(2)
         local_lbl = QLabel("💻 Local:")
         local_lbl.setStyleSheet("font-weight: bold; color: #569cd6;")
         self.txt_local_path = QLineEdit(str(Path.home()))
-        self.btn_local_up = QPushButton("▲ ..")
-        self.btn_local_up.setFixedWidth(40)
+        self.txt_local_path.setFixedHeight(28)
         self.btn_local_go = QPushButton("Go")
-        self.btn_local_go.setFixedWidth(40)
+        self.btn_local_go.setFixedSize(40, 28)
+        self.btn_local_go.setStyleSheet("font-size: 12px; font-weight: bold;")
         local_header.addWidget(local_lbl)
-        local_header.addWidget(self.txt_local_path)
-        local_header.addWidget(self.btn_local_up)
+        local_header.addWidget(self.txt_local_path, 1)
         local_header.addWidget(self.btn_local_go)
         left_layout.addLayout(local_header)
 
         self.table_local = CommanderTableWidget("local", self)
         left_layout.addWidget(self.table_local)
+
+        # Local Status Bar
+        local_sb_layout = QHBoxLayout()
+        local_sb_layout.setContentsMargins(4, 2, 4, 2)
+        self.lbl_local_status = QLabel("0 B in 0 of 0 files")
+        self.lbl_local_status.setStyleSheet("font-size: 11px;")
+        self.lbl_local_filter = QLabel("*.*")
+        self.lbl_local_filter.setStyleSheet("font-size: 11px;")
+        local_sb_layout.addWidget(self.lbl_local_status, 1)
+        local_sb_layout.addWidget(self.lbl_local_filter)
+        left_layout.addLayout(local_sb_layout)
+
         self.h_splitter.addWidget(left_widget)
 
         # === Right Panel: Remote Filesystem ===
@@ -468,26 +562,93 @@ class SessionCommanderView(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(2)
 
+        # WinSCP Remote Drive / Quick Jump Bar
+        remote_drive_bar = QHBoxLayout()
+        remote_drive_bar.setSpacing(3)
+        self.cmb_remote_locations = QComboBox()
+        self.cmb_remote_locations.setMinimumWidth(160)
+        self.cmb_remote_locations.setFixedHeight(30)
+        self.cmb_remote_locations.setStyleSheet("QComboBox { font-size: 12px; font-weight: 500; padding: 2px 6px; }")
+        self.cmb_remote_locations.addItem("📁 / (Root)", "/")
+        self.cmb_remote_locations.addItem("🏠 ~ (User Home)", "~")
+        self.cmb_remote_locations.addItem("📁 /var/www", "/var/www")
+        self.cmb_remote_locations.addItem("📁 /etc", "/etc")
+        self.cmb_remote_locations.addItem("📁 /tmp", "/tmp")
+        self.cmb_remote_locations.activated.connect(lambda idx: self._load_remote_directory(self.cmb_remote_locations.currentData()) if self.sftp_client.is_connected else None)
+
+        self.btn_remote_up = QPushButton("⬆")
+        self.btn_remote_up.setToolTip("Go to parent remote directory [..] (Backspace)")
+        self.btn_remote_home = QPushButton("🏠")
+        self.btn_remote_home.setToolTip("Go to Home directory (~)")
+        self.btn_remote_root = QPushButton("/")
+        self.btn_remote_root.setToolTip("Go to Root directory (/)")
+        self.btn_remote_bmark = QPushButton("⭐")
+        self.btn_remote_bmark.setToolTip("Bookmarks (Ctrl+D)")
+        self.btn_remote_refresh = QPushButton("🔄")
+        self.btn_remote_refresh.setToolTip("Refresh remote directory (Ctrl+R)")
+
+        for b in [self.btn_remote_up, self.btn_remote_home, self.btn_remote_root, self.btn_remote_bmark, self.btn_remote_refresh]:
+            b.setFixedSize(36, 30)
+            b.setStyleSheet("QPushButton { font-size: 16px; font-weight: bold; padding: 0px; }")
+
+        remote_drive_bar.addWidget(self.cmb_remote_locations, 1)
+        remote_drive_bar.addWidget(self.btn_remote_up)
+        remote_drive_bar.addWidget(self.btn_remote_home)
+        remote_drive_bar.addWidget(self.btn_remote_root)
+        remote_drive_bar.addWidget(self.btn_remote_bmark)
+        remote_drive_bar.addWidget(self.btn_remote_refresh)
+        right_layout.addLayout(remote_drive_bar)
+
+        # Remote Path bar
         remote_header = QHBoxLayout()
+        remote_header.setSpacing(2)
         remote_lbl = QLabel("🌐 Remote:")
         remote_lbl.setStyleSheet("font-weight: bold; color: #4ec9b0;")
         self.txt_remote_path = QLineEdit("/")
-        self.btn_remote_up = QPushButton("▲ ..")
-        self.btn_remote_up.setFixedWidth(40)
+        self.txt_remote_path.setFixedHeight(28)
         self.btn_remote_go = QPushButton("Go")
-        self.btn_remote_go.setFixedWidth(40)
+        self.btn_remote_go.setFixedSize(40, 28)
+        self.btn_remote_go.setStyleSheet("font-size: 12px; font-weight: bold;")
         remote_header.addWidget(remote_lbl)
-        remote_header.addWidget(self.txt_remote_path)
-        remote_header.addWidget(self.btn_remote_up)
+        remote_header.addWidget(self.txt_remote_path, 1)
         remote_header.addWidget(self.btn_remote_go)
         right_layout.addLayout(remote_header)
 
         self.table_remote = CommanderTableWidget("remote", self)
         right_layout.addWidget(self.table_remote)
+
+        # Remote Status Bar
+        remote_sb_layout = QHBoxLayout()
+        remote_sb_layout.setContentsMargins(4, 2, 4, 2)
+        self.lbl_remote_status = QLabel("0 B in 0 of 0 files")
+        self.lbl_remote_status.setStyleSheet("font-size: 11px;")
+        self.lbl_remote_filter = QLabel("*.*")
+        self.lbl_remote_filter.setStyleSheet("font-size: 11px;")
+        remote_sb_layout.addWidget(self.lbl_remote_status, 1)
+        remote_sb_layout.addWidget(self.lbl_remote_filter)
+        right_layout.addLayout(remote_sb_layout)
+
         self.h_splitter.addWidget(right_widget)
 
         self.h_splitter.setStretchFactor(0, 1)
         self.h_splitter.setStretchFactor(1, 1)
+
+        # WinSCP Command Line Bar (Commander mode)
+        cmd_panel = QHBoxLayout()
+        cmd_panel.setContentsMargins(2, 2, 2, 2)
+        cmd_panel.setSpacing(4)
+        lbl_cmd = QLabel("💻 Command:")
+        lbl_cmd.setStyleSheet("font-weight: bold; font-size: 11px;")
+        self.txt_cmd_line = QLineEdit()
+        self.txt_cmd_line.setPlaceholderText("Enter command to execute (e.g. ls -la, df -h, tar -czvf archive.tar.gz)...")
+        self.txt_cmd_line.returnPressed.connect(self._on_execute_cmd_line)
+        self.btn_exec_cmd = QPushButton("▶ Execute")
+        self.btn_exec_cmd.setFixedWidth(80)
+        self.btn_exec_cmd.clicked.connect(self._on_execute_cmd_line)
+        cmd_panel.addWidget(lbl_cmd)
+        cmd_panel.addWidget(self.txt_cmd_line, 1)
+        cmd_panel.addWidget(self.btn_exec_cmd)
+        layout.addLayout(cmd_panel)
 
         self.terminal_widget = None
 
@@ -495,22 +656,32 @@ class SessionCommanderView(QWidget):
         self.btn_local_go.clicked.connect(self._on_local_go)
         self.txt_local_path.returnPressed.connect(self._on_local_go)
         self.btn_local_up.clicked.connect(self._on_local_up)
+        self.btn_local_home.clicked.connect(lambda: self._load_local_directory(str(Path.home())))
+        self.btn_local_root.clicked.connect(lambda: self._load_local_directory("/"))
+        self.btn_local_refresh.clicked.connect(lambda: self._load_local_directory(self.txt_local_path.text()))
+        self.btn_local_bmark.clicked.connect(self._open_bookmarks)
+
         self.table_local.cellDoubleClicked.connect(self._on_local_double_clicked)
         self.table_local.customContextMenuRequested.connect(self._show_local_context_menu)
         self.table_local.items_dropped.connect(self._handle_items_dropped)
         self.table_local.rename_requested.connect(lambda: self.rename_selected("local"))
         self._last_active_pane = "local"
-        self.table_local.itemSelectionChanged.connect(lambda: setattr(self, "_last_active_pane", "local"))
+        self.table_local.itemSelectionChanged.connect(lambda: (setattr(self, "_last_active_pane", "local"), self._update_local_status()))
         self.table_local.cellClicked.connect(lambda r, c: setattr(self, "_last_active_pane", "local"))
 
         self.btn_remote_go.clicked.connect(self._on_remote_go)
         self.txt_remote_path.returnPressed.connect(self._on_remote_go)
         self.btn_remote_up.clicked.connect(self._on_remote_up)
+        self.btn_remote_home.clicked.connect(self._on_remote_home)
+        self.btn_remote_root.clicked.connect(lambda: self._load_remote_directory("/") if self.sftp_client.is_connected else None)
+        self.btn_remote_refresh.clicked.connect(lambda: self._load_remote_directory(self.txt_remote_path.text()) if self.sftp_client.is_connected else None)
+        self.btn_remote_bmark.clicked.connect(self._open_bookmarks)
+
         self.table_remote.cellDoubleClicked.connect(self._on_remote_double_clicked)
         self.table_remote.customContextMenuRequested.connect(self._show_remote_context_menu)
         self.table_remote.items_dropped.connect(self._handle_items_dropped)
         self.table_remote.rename_requested.connect(lambda: self.rename_selected("remote"))
-        self.table_remote.itemSelectionChanged.connect(lambda: setattr(self, "_last_active_pane", "remote"))
+        self.table_remote.itemSelectionChanged.connect(lambda: (setattr(self, "_last_active_pane", "remote"), self._update_remote_status()))
         self.table_remote.cellClicked.connect(lambda r, c: setattr(self, "_last_active_pane", "remote"))
 
     def _wire_sync_engine(self):
@@ -521,6 +692,73 @@ class SessionCommanderView(QWidget):
         self.sync_engine.sync_failed.connect(
             lambda r, err: self.status_message.emit(f"❌ Auto-sync failed for {r}: {err}")
         )
+
+    def _open_bookmarks(self):
+        main_win = self.window()
+        if hasattr(main_win, "open_bookmarks_dialog"):
+            main_win.open_bookmarks_dialog()
+
+    def _on_remote_home(self):
+        if not self.sftp_client.is_connected:
+            return
+        home = self.current_session.remote_dir if (self.current_session and self.current_session.remote_dir) else "/"
+        self._load_remote_directory(home)
+
+    def _on_execute_cmd_line(self):
+        cmd = self.txt_cmd_line.text().strip()
+        if not cmd:
+            return
+        self.txt_cmd_line.clear()
+        if self.sftp_client.is_connected:
+            self.status_message.emit(f"Executing remote: {cmd}...")
+            try:
+                code, out, err = self.sftp_client.exec_command(cmd)
+                from .custom_commands_dialog import CustomCommandOutputDialog
+                dlg = CustomCommandOutputDialog(cmd, code, out, err, parent=self)
+                dlg.exec()
+            except Exception as e:
+                QMessageBox.critical(self, "Command Error", f"Failed to execute command:\n{e}")
+        else:
+            self.status_message.emit(f"Executing local: {cmd}...")
+            try:
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=self.txt_local_path.text())
+                from .custom_commands_dialog import CustomCommandOutputDialog
+                dlg = CustomCommandOutputDialog(cmd, res.returncode, res.stdout, res.stderr, parent=self)
+                dlg.exec()
+            except Exception as e:
+                QMessageBox.critical(self, "Command Error", f"Failed to execute local command:\n{e}")
+
+    def _update_local_status(self):
+        if not hasattr(self, "lbl_local_status"):
+            return
+        total_rows = self.table_local.rowCount()
+        selected_rows = len(set(it.row() for it in self.table_local.selectedItems()))
+        total_size = 0
+        file_count = 0
+        for r in range(total_rows):
+            it = self.table_local.item(r, 0)
+            if it:
+                d = it.data(Qt.ItemDataRole.UserRole)
+                if d and not d.get("is_dir") and d.get("name") != "..":
+                    file_count += 1
+                    try:
+                        total_size += os.path.getsize(d["path"])
+                    except Exception:
+                        pass
+        if selected_rows > 0:
+            self.lbl_local_status.setText(f"{selected_rows} selected of {total_rows} items")
+        else:
+            self.lbl_local_status.setText(f"{self._format_size(total_size)} in {file_count} files")
+
+    def _update_remote_status(self):
+        if not hasattr(self, "lbl_remote_status"):
+            return
+        total_rows = self.table_remote.rowCount()
+        selected_rows = len(set(it.row() for it in self.table_remote.selectedItems()))
+        if selected_rows > 0:
+            self.lbl_remote_status.setText(f"{selected_rows} selected of {total_rows} items")
+        else:
+            self.lbl_remote_status.setText(f"{total_rows} items")
 
     def connect_to_session(self, session: SessionConfig):
         """Connects to the specified session."""
@@ -711,6 +949,8 @@ class SessionCommanderView(QWidget):
             except Exception:
                 continue
 
+        self._update_local_status()
+
     def _on_local_go(self):
         path = self.txt_local_path.text().strip()
         self._load_local_directory(path)
@@ -782,6 +1022,19 @@ class SessionCommanderView(QWidget):
             self.table_remote.set_current_directory(current_dir)
             self.table_remote.setRowCount(0)
 
+            # WinSCP always shows parent [..] item when not at root directory
+            if current_dir != "/":
+                cur_clean = current_dir.rstrip("/")
+                parent_dir = str(Path(cur_clean).parent) if cur_clean else "/"
+                if not parent_dir.startswith("/"):
+                    parent_dir = "/" + parent_dir
+                row = self.table_remote.rowCount()
+                self.table_remote.insertRow(row)
+                self._set_table_item(self.table_remote, row, 0, "..", is_dir=True, path=parent_dir)
+                self._set_table_item(self.table_remote, row, 1, "")
+                self._set_table_item(self.table_remote, row, 2, "drwxr-xr-x")
+                self._set_table_item(self.table_remote, row, 3, "")
+
             for item in items:
                 row = self.table_remote.rowCount()
                 self.table_remote.insertRow(row)
@@ -799,6 +1052,7 @@ class SessionCommanderView(QWidget):
                 self._set_table_item(self.table_remote, row, 2, f"{item.permissions_octal} ({item.permissions_str})")
                 self._set_table_item(self.table_remote, row, 3, item.modified_str)
 
+            self._update_remote_status()
             self.status_message.emit(f"Loaded {len(items)} items in {current_dir}")
 
         def _on_failed(err: str):
@@ -1130,6 +1384,146 @@ class SessionCommanderView(QWidget):
 
         self._execute_batch_transfer(transfers, refresh_pane="local")
 
+    def properties_selected(self):
+        """WinSCP-style Properties & Rights dialog (F9)."""
+        is_remote = self.table_remote.hasFocus() or (
+            not self.table_local.hasFocus()
+            and self.sftp_client.is_connected
+            and bool(self.table_remote.selectedItems())
+        )
+
+        if is_remote and self.sftp_client.is_connected:
+            selected = self.table_remote.selectedItems()
+            if not selected:
+                QMessageBox.information(self, "No Item Selected", "Please select a remote file or folder.")
+                return
+            row = selected[0].row()
+            data = self.table_remote.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                return
+
+            info: Optional[RemoteFileInfo] = data.get("info")
+            mode = info.mode if info else 0o755
+            size = info.size if info else 0
+            mtime = info.modified_time if info else 0.0
+            is_dir = bool(data.get("is_dir", False))
+            uid = info.uid if info else 0
+            gid = info.gid if info else 0
+
+            symlink_target = ""
+            if info and info.is_symlink:
+                try:
+                    symlink_target = self.sftp_client.readlink(data["path"])
+                except Exception:
+                    pass
+
+            dlg = PropertiesDialog(
+                name=data["name"],
+                path=data["path"],
+                size=size,
+                mode=mode,
+                mtime=mtime,
+                is_dir=is_dir,
+                is_remote=True,
+                sftp_client=self.sftp_client,
+                uid=uid,
+                gid=gid,
+                symlink_target=symlink_target,
+                parent=self,
+            )
+
+            def _on_remote_perm_changed(new_mode: int, recursive: bool):
+                action_fn = (
+                    (lambda: self.sftp_client.chmod_recursive(data["path"], new_mode))
+                    if recursive and is_dir
+                    else (lambda: self.sftp_client.chmod(data["path"], new_mode))
+                )
+                rec_label = " (recursively)" if (recursive and is_dir) else ""
+                worker = SFTPActionWorker(
+                    action_fn=action_fn,
+                    success_msg=f"Permissions updated to {oct(new_mode)[2:]}{rec_label} for {data['name']}",
+                )
+                self._active_worker = worker
+                worker.finished.connect(
+                    lambda msg: (self.status_message.emit(msg), self._load_remote_directory(self.txt_remote_path.text()))
+                )
+                worker.failed.connect(lambda err: QMessageBox.critical(self, "Chmod Error", f"Could not change permissions:\n{err}"))
+                worker.start()
+
+            dlg.permissions_changed.connect(_on_remote_perm_changed)
+            dlg.exec()
+        else:
+            selected = self.table_local.selectedItems()
+            if not selected:
+                QMessageBox.information(self, "No Item Selected", "Please select a local file or folder.")
+                return
+            row = selected[0].row()
+            data = self.table_local.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                return
+
+            local_path = data["path"]
+            if not os.path.exists(local_path):
+                return
+
+            is_dir = os.path.isdir(local_path)
+            symlink_target = os.readlink(local_path) if os.path.islink(local_path) else ""
+            try:
+                st = os.stat(local_path)
+                mode = st.st_mode
+                size = st.st_size
+                mtime = st.st_mtime
+                uid = st.st_uid
+                gid = st.st_gid
+            except Exception:
+                mode = 0o755
+                size = 0
+                mtime = 0.0
+                uid = 0
+                gid = 0
+
+            dlg = PropertiesDialog(
+                name=data["name"],
+                path=local_path,
+                size=size,
+                mode=mode,
+                mtime=mtime,
+                is_dir=is_dir,
+                is_remote=False,
+                sftp_client=None,
+                uid=uid,
+                gid=gid,
+                symlink_target=symlink_target,
+                parent=self,
+            )
+
+            def _on_local_perm_changed(new_mode: int, recursive: bool):
+                try:
+                    if recursive and is_dir:
+                        os.chmod(local_path, new_mode)
+                        for root, dirs, files in os.walk(local_path):
+                            for d in dirs:
+                                try:
+                                    os.chmod(os.path.join(root, d), new_mode)
+                                except Exception:
+                                    pass
+                            for f in files:
+                                try:
+                                    os.chmod(os.path.join(root, f), new_mode)
+                                except Exception:
+                                    pass
+                    else:
+                        os.chmod(local_path, new_mode)
+
+                    rec_label = " (recursively)" if (recursive and is_dir) else ""
+                    self.status_message.emit(f"Local permissions updated to {oct(new_mode)[2:]}{rec_label} for {data['name']}")
+                    self._load_local_directory(self.txt_local_path.text())
+                except Exception as exc:
+                    QMessageBox.critical(self, "Chmod Error", f"Could not change local permissions:\n{exc}")
+
+            dlg.permissions_changed.connect(_on_local_perm_changed)
+            dlg.exec()
+
     def chmod_selected(self):
         # Check whether remote or local pane is active
         is_remote = self.table_remote.hasFocus() or (
@@ -1220,6 +1614,221 @@ class SessionCommanderView(QWidget):
                     self._load_local_directory(self.txt_local_path.text())
                 except Exception as exc:
                     QMessageBox.critical(self, "Chmod Error", f"Could not change local permissions:\n{exc}")
+
+    def create_symlink(self):
+        """WinSCP Commands -> New -> Symbolic Link."""
+        is_remote = self.table_remote.hasFocus() and self.sftp_client.is_connected
+        curr_dir = self.txt_remote_path.text() if is_remote else self.txt_local_path.text()
+
+        table = self.table_remote if is_remote else self.table_local
+        default_target = ""
+        selected = table.selectedItems()
+        if selected:
+            row = selected[0].row()
+            data = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if data and data.get("name") != "..":
+                default_target = data["name"]
+
+        dlg = SymlinkDialog(default_target=default_target, current_dir=curr_dir, is_remote=is_remote, parent=self)
+
+        def _on_link_created(target: str, link_name: str, is_hard: bool):
+            if is_remote:
+                remote_link_path = f"{curr_dir.rstrip('/')}/{link_name}"
+                try:
+                    self.sftp_client.create_symlink(target, remote_link_path)
+                    self.status_message.emit(f"Created symbolic link: {link_name} -> {target}")
+                    self._load_remote_directory(curr_dir)
+                except Exception as exc:
+                    QMessageBox.critical(self, "Symlink Error", f"Failed to create remote link:\n{exc}")
+            else:
+                local_link_path = os.path.join(curr_dir, link_name)
+                try:
+                    if is_hard:
+                        os.link(target, local_link_path)
+                    else:
+                        os.symlink(target, local_link_path)
+                    self.status_message.emit(f"Created local link: {link_name} -> {target}")
+                    self._load_local_directory(curr_dir)
+                except Exception as exc:
+                    QMessageBox.critical(self, "Symlink Error", f"Failed to create local link:\n{exc}")
+
+        dlg.link_created.connect(_on_link_created)
+        dlg.exec()
+
+    def compare_directories(self):
+        """WinSCP Commands -> Compare Directories (Shift+F2)."""
+        local_map = {}
+        for r in range(self.table_local.rowCount()):
+            it = self.table_local.item(r, 0)
+            if not it:
+                continue
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+            local_map[data["name"]] = (r, data)
+
+        remote_map = {}
+        for r in range(self.table_remote.rowCount()):
+            it = self.table_remote.item(r, 0)
+            if not it:
+                continue
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+            remote_map[data["name"]] = (r, data)
+
+        self.table_local.clearSelection()
+        self.table_remote.clearSelection()
+
+        diff_count = 0
+        for name, (row, data) in local_map.items():
+            if name not in remote_map:
+                self.table_local.selectRow(row)
+                diff_count += 1
+            else:
+                rem_row, rem_data = remote_map[name]
+                loc_size = data.get("size", 0)
+                rem_size = rem_data.get("size", 0)
+                loc_mtime = data.get("mtime", 0.0)
+                rem_mtime = rem_data.get("mtime", 0.0)
+
+                if loc_size != rem_size or loc_mtime > (rem_mtime + 2.0):
+                    self.table_local.selectRow(row)
+                    diff_count += 1
+                elif rem_mtime > (loc_mtime + 2.0):
+                    self.table_remote.selectRow(rem_row)
+                    diff_count += 1
+
+        for name, (rem_row, rem_data) in remote_map.items():
+            if name not in local_map:
+                self.table_remote.selectRow(rem_row)
+                diff_count += 1
+
+        self.status_message.emit(f"Directory comparison complete: {diff_count} difference(s) detected.")
+        QMessageBox.information(
+            self,
+            "Compare Directories (Shift+F2)",
+            f"Comparison completed!\nFound {diff_count} difference(s) (newer, different size, or missing files) highlighted in the active panes.",
+        )
+
+    def select_by_mask(self, is_select: bool = True):
+        import fnmatch
+        prompt = "Select files matching mask (e.g. *.py; *.txt):" if is_select else "Deselect files matching mask:"
+        title = "Select by Mask (+)" if is_select else "Deselect by Mask (-)"
+        mask, ok = QInputDialog.getText(self, title, prompt, text="*.*")
+        if not ok or not mask.strip():
+            return
+
+        table = self.table_remote if (self.table_remote.hasFocus() and self.sftp_client.is_connected) else self.table_local
+        for r in range(table.rowCount()):
+            it = table.item(r, 0)
+            if not it:
+                continue
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+            name = data.get("name", "")
+            matches = any(fnmatch.fnmatch(name.lower(), p.strip().lower()) for p in mask.split(";") if p.strip())
+            if matches:
+                if is_select:
+                    table.selectRow(r)
+                else:
+                    for col in range(table.columnCount()):
+                        cell = table.item(r, col)
+                        if cell:
+                            cell.setSelected(False)
+
+    def invert_selection(self):
+        table = self.table_remote if (self.table_remote.hasFocus() and self.sftp_client.is_connected) else self.table_local
+        for r in range(table.rowCount()):
+            it = table.item(r, 0)
+            if not it:
+                continue
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if not data or data.get("name") == "..":
+                continue
+            is_sel = it.isSelected()
+            for col in range(table.columnCount()):
+                cell = table.item(r, col)
+                if cell:
+                    cell.setSelected(not is_sel)
+
+    def select_all_items(self, select: bool = True):
+        table = self.table_remote if (self.table_remote.hasFocus() and self.sftp_client.is_connected) else self.table_local
+        if select:
+            for r in range(table.rowCount()):
+                it = table.item(r, 0)
+                if it and it.data(Qt.ItemDataRole.UserRole) and it.data(Qt.ItemDataRole.UserRole).get("name") != "..":
+                    table.selectRow(r)
+        else:
+            table.clearSelection()
+
+    def open_synchronize_dialog(self):
+        dlg = SynchronizeDialog(self.sftp_client, self.txt_local_path.text(), self.txt_remote_path.text(), self)
+        dlg.sync_completed.connect(self.refresh_both)
+        dlg.exec()
+
+    def open_bookmarks_dialog(self):
+        dlg = BookmarksDialog(self.txt_remote_path.text(), self.txt_local_path.text(), self)
+        def _on_jump(remote_p, local_p):
+            if remote_p and self.sftp_client.is_connected:
+                self._load_remote_directory(remote_p)
+            if local_p:
+                self._load_local_directory(local_p)
+        dlg.jump_requested.connect(_on_jump)
+        dlg.exec()
+
+    def open_find_files_dialog(self):
+        dlg = FindFilesDialog(self.sftp_client, self.txt_remote_path.text(), self.txt_local_path.text(), self)
+        def _on_nav(folder, is_rem):
+            if is_rem and self.sftp_client.is_connected:
+                self._load_remote_directory(folder)
+            else:
+                self._load_local_directory(folder)
+        def _on_open(path, is_rem):
+            if is_rem:
+                self.edit_selected_remote_file()
+            else:
+                self.open_selected_local_file()
+        dlg.navigate_requested.connect(_on_nav)
+        dlg.open_file_requested.connect(_on_open)
+        dlg.exec()
+
+    def open_custom_commands_dialog(self):
+        files = []
+        for r in range(self.table_remote.rowCount()):
+            it = self.table_remote.item(r, 0)
+            if it and it.isSelected():
+                data = it.data(Qt.ItemDataRole.UserRole)
+                if data and data.get("name") != "..":
+                    files.append(data["name"])
+        dlg = CustomCommandsDialog(self.sftp_client, self.txt_remote_path.text(), files, self)
+        dlg.exec()
+
+    def open_generate_url_dialog(self):
+        if not self.current_session:
+            QMessageBox.information(self, "No Active Session", "Connect to a session to generate its URL.")
+            return
+        dlg = GenerateUrlDialog(self.current_session, current_path=self.txt_remote_path.text(), parent=self)
+        dlg.exec()
+
+    def view_selected(self):
+        if self.table_remote.hasFocus() and self.sftp_client.is_connected:
+            self.edit_selected_remote_file()
+        else:
+            self.open_selected_local_file()
+
+    def copy_selected(self):
+        if self.table_local.hasFocus():
+            self.upload_selected()
+        else:
+            self.download_selected()
+
+    def move_selected(self):
+        if self.table_local.hasFocus():
+            self.rename_selected("local")
+        else:
+            self.rename_selected("remote")
 
     def delete_selected(self):
         if self.table_remote.hasFocus() and self.sftp_client.is_connected:
@@ -1560,27 +2169,51 @@ class MainWindow(QMainWindow):
 
         self.tab_widget.tabCloseRequested.connect(self._close_session_tab)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        self.tab_widget.tabBar().tabMoved.connect(lambda *_: self._update_tab_tooltips())
 
         main_layout.addWidget(self.tab_widget)
+
+        # Bottom Classic Commander Function Keys Bar (F2..F10)
+        self.function_bar = FunctionBarWidget(self)
+        self.function_bar.f2_rename_clicked.connect(self.rename_selected)
+        self.function_bar.f3_view_clicked.connect(self.view_selected)
+        self.function_bar.f4_edit_clicked.connect(self.edit_selected_remote_file)
+        self.function_bar.f5_copy_clicked.connect(self.copy_selected)
+        self.function_bar.f6_move_clicked.connect(self.move_selected)
+        self.function_bar.f7_mkdir_clicked.connect(self.create_directory)
+        self.function_bar.f8_delete_clicked.connect(self.delete_selected)
+        self.function_bar.f9_properties_clicked.connect(self.properties_selected)
+        self.function_bar.f10_quit_clicked.connect(self.close)
+        main_layout.addWidget(self.function_bar)
 
     def _setup_menus(self):
         menubar = self.menuBar()
 
-        # Session Menu
+        # ================= Session Menu =================
         m_session = menubar.addMenu("&Session")
         act_login = m_session.addAction("New Session (Connect)...")
         act_login.setShortcut("Ctrl+N")
         act_login.triggered.connect(self.open_session_dialog)
 
+        act_reconnect = m_session.addAction("Reconnect")
+        act_reconnect.triggered.connect(self.reconnect_active_session)
+
+        act_duplicate = m_session.addAction("Duplicate Session in New Tab")
+        act_duplicate.triggered.connect(self.duplicate_active_session)
+
+        act_disconnect = m_session.addAction("Disconnect Active Session")
+        act_disconnect.triggered.connect(self.disconnect_session)
+
         act_close_tab = m_session.addAction("Close Active Tab")
         act_close_tab.setShortcut("Ctrl+W")
         act_close_tab.triggered.connect(lambda: self._close_session_tab(self.tab_widget.currentIndex()))
 
-        act_disconnect = m_session.addAction("Disconnect Active Session")
-        act_disconnect.setShortcut("Ctrl+D")
-        act_disconnect.triggered.connect(self.disconnect_session)
-
         m_session.addSeparator()
+        act_gen_url = m_session.addAction("Generate Session URL / Code...")
+        act_gen_url.setShortcut(QKeySequence("Ctrl+Alt+U"))
+        act_gen_url.triggered.connect(self.open_generate_url_dialog)
+        self.addAction(act_gen_url)
+
         act_export = m_session.addAction("Export / Import Sessions...")
         act_export.triggered.connect(self.open_export_dialog)
 
@@ -1589,49 +2222,122 @@ class MainWindow(QMainWindow):
         act_quit.setShortcut("Ctrl+Q")
         act_quit.triggered.connect(self.close)
 
-        # Commands Menu
-        m_cmd = menubar.addMenu("&Commands")
-        act_upload = m_cmd.addAction("Upload (F5)")
-        act_upload.setShortcut("F5")
-        act_upload.triggered.connect(self.upload_selected)
+        # ================= Files Menu =================
+        m_files = menubar.addMenu("&Files")
+        act_open_edit = m_files.addAction("Open / Edit (F4)")
+        act_open_edit.setShortcut(QKeySequence("F4"))
+        act_open_edit.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_open_edit.triggered.connect(self.edit_selected_remote_file)
+        self.addAction(act_open_edit)
 
-        act_download = m_cmd.addAction("Download (F5)")
-        act_download.triggered.connect(self.download_selected)
-
-        act_edit = m_cmd.addAction("Edit / Open (F4)")
-        act_edit.setShortcut(QKeySequence("F4"))
-        act_edit.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-        act_edit.triggered.connect(self.edit_selected_remote_file)
-        self.addAction(act_edit)
-
-        act_open_with = m_cmd.addAction("Open With...")
+        act_open_with = m_files.addAction("Open With...")
         act_open_with.triggered.connect(self.open_with_selected)
 
-        act_rename = m_cmd.addAction("Rename (F2)")
+        act_view = m_files.addAction("View (F3)")
+        act_view.setShortcut(QKeySequence("F3"))
+        act_view.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_view.triggered.connect(self.view_selected)
+        self.addAction(act_view)
+
+        m_files.addSeparator()
+        act_copy = m_files.addAction("Copy / Transfer (F5)")
+        act_copy.setShortcut(QKeySequence("F5"))
+        act_copy.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_copy.triggered.connect(self.copy_selected)
+        self.addAction(act_copy)
+
+        act_move = m_files.addAction("Move (F6)")
+        act_move.setShortcut(QKeySequence("F6"))
+        act_move.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_move.triggered.connect(self.move_selected)
+        self.addAction(act_move)
+
+        act_rename = m_files.addAction("Rename (F2)")
         act_rename.setShortcut(QKeySequence("F2"))
         act_rename.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_rename.triggered.connect(self.rename_selected)
         self.addAction(act_rename)
 
-        act_del = m_cmd.addAction("Delete (F8)")
+        act_del = m_files.addAction("Delete (F8)")
         act_del.setShortcut(QKeySequence("F8"))
         act_del.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_del.triggered.connect(self.delete_selected)
         self.addAction(act_del)
 
-        act_mkdir = m_cmd.addAction("New Directory (F7)")
+        m_files.addSeparator()
+        act_mkdir = m_files.addAction("New Directory (F7)")
         act_mkdir.setShortcut(QKeySequence("F7"))
         act_mkdir.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         act_mkdir.triggered.connect(self.create_directory)
         self.addAction(act_mkdir)
 
-        act_chmod = m_cmd.addAction("Properties / Chmod (F9)")
-        act_chmod.setShortcut(QKeySequence("F9"))
-        act_chmod.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
-        act_chmod.triggered.connect(self.chmod_selected)
-        self.addAction(act_chmod)
+        act_symlink = m_files.addAction("New Symbolic Link...")
+        act_symlink.triggered.connect(self.create_symlink)
+
+        m_files.addSeparator()
+        act_prop = m_files.addAction("Properties / Rights (F9)")
+        act_prop.setShortcut(QKeySequence("F9"))
+        act_prop.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_prop.triggered.connect(self.properties_selected)
+        self.addAction(act_prop)
+
+        # ================= Mark Menu =================
+        m_mark = menubar.addMenu("&Mark")
+        act_sel_all = m_mark.addAction("Select All (Ctrl+A)")
+        act_sel_all.setShortcut(QKeySequence("Ctrl+A"))
+        act_sel_all.triggered.connect(lambda: self.select_all_items(True))
+
+        act_desel_all = m_mark.addAction("Deselect All (Ctrl+Shift+A)")
+        act_desel_all.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        act_desel_all.triggered.connect(lambda: self.select_all_items(False))
+
+        act_invert = m_mark.addAction("Invert Selection (Ctrl+I)")
+        act_invert.setShortcut(QKeySequence("Ctrl+I"))
+        act_invert.triggered.connect(self.invert_selection)
+
+        m_mark.addSeparator()
+        act_sel_mask = m_mark.addAction("Select by Mask... (+)")
+        act_sel_mask.triggered.connect(lambda: self.select_by_mask(True))
+
+        act_desel_mask = m_mark.addAction("Deselect by Mask... (-)")
+        act_desel_mask.triggered.connect(lambda: self.select_by_mask(False))
+
+        # ================= Commands Menu =================
+        m_cmd = menubar.addMenu("&Commands")
+        act_sync = m_cmd.addAction("Synchronize... (Ctrl+S)")
+        act_sync.setShortcut(QKeySequence("Ctrl+S"))
+        act_sync.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_sync.triggered.connect(self.open_synchronize_dialog)
+        self.addAction(act_sync)
+
+        act_compare = m_cmd.addAction("Compare Directories (Shift+F2)")
+        act_compare.setShortcut(QKeySequence("Shift+F2"))
+        act_compare.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_compare.triggered.connect(self.compare_directories)
+        self.addAction(act_compare)
+
+        act_find = m_cmd.addAction("Find Files... (Ctrl+F)")
+        act_find.setShortcuts([QKeySequence("Ctrl+F"), QKeySequence("Shift+F7")])
+        act_find.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_find.triggered.connect(self.open_find_files_dialog)
+        self.addAction(act_find)
+
+        act_custom_cmd = m_cmd.addAction("Custom Commands... (Ctrl+Shift+C)")
+        act_custom_cmd.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        act_custom_cmd.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_custom_cmd.triggered.connect(self.open_custom_commands_dialog)
+        self.addAction(act_custom_cmd)
+
+        act_bmarks = m_cmd.addAction("Directory Bookmarks... (Ctrl+D)")
+        act_bmarks.setShortcut(QKeySequence("Ctrl+D"))
+        act_bmarks.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_bmarks.triggered.connect(self.open_bookmarks_dialog)
+        self.addAction(act_bmarks)
 
         m_cmd.addSeparator()
+        act_open_with = m_cmd.addAction("Open With...")
+        act_open_with.triggered.connect(self.open_with_selected)
+
         act_pref_editor = m_cmd.addAction("Configure Default Applications...")
         act_pref_editor.triggered.connect(self.configure_default_applications)
 
@@ -1642,7 +2348,38 @@ class MainWindow(QMainWindow):
         act_term_win.triggered.connect(self.open_terminal_window)
         self.addAction(act_term_win)
 
-        # View Menu
+        # ================= Tabs Menu =================
+        m_tabs = menubar.addMenu("&Tabs")
+        self.m_tabs = m_tabs
+
+        self.act_next_tab = m_tabs.addAction("Next Tab (Ctrl+Tab)")
+        self.act_next_tab.setShortcuts([QKeySequence("Ctrl+Tab"), QKeySequence("Ctrl+PgDown")])
+        self.act_next_tab.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.act_next_tab.triggered.connect(self.next_session_tab)
+        self.addAction(self.act_next_tab)
+
+        self.act_prev_tab = m_tabs.addAction("Previous Tab (Ctrl+Shift+Tab)")
+        self.act_prev_tab.setShortcuts([QKeySequence("Ctrl+Shift+Tab"), QKeySequence("Ctrl+PgUp")])
+        self.act_prev_tab.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self.act_prev_tab.triggered.connect(self.prev_session_tab)
+        self.addAction(self.act_prev_tab)
+
+        m_tabs.addSeparator()
+
+        self.tab_actions = []
+        for i in range(1, 10):
+            label = f"Switch to Tab {i}" if i < 9 else "Switch to Tab 9 / Last Tab"
+            act_tab = m_tabs.addAction(f"{label} (Ctrl+{i})")
+            act_tab.setShortcut(QKeySequence(f"Ctrl+{i}"))
+            act_tab.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            target_idx = i - 1
+            act_tab.triggered.connect(partial(self._on_switch_tab_action, target_idx))
+            self.addAction(act_tab)
+            self.tab_actions.append(act_tab)
+
+        m_tabs.aboutToShow.connect(self._refresh_tabs_menu)
+
+        # ================= View Menu =================
         m_view = menubar.addMenu("&View")
         act_refresh = m_view.addAction("Refresh (Ctrl+R)")
         act_refresh.setShortcut(QKeySequence("Ctrl+R"))
@@ -1650,7 +2387,21 @@ class MainWindow(QMainWindow):
         act_refresh.triggered.connect(self.refresh_both)
         self.addAction(act_refresh)
 
-        # Help Menu
+        act_toggle_fbar = m_view.addAction("Toggle Function Keys Bar")
+        act_toggle_fbar.triggered.connect(self.toggle_function_bar)
+
+        act_toggle_theme = m_view.addAction("🎨 Toggle Theme (Classic WinSCP / Dark)")
+        act_toggle_theme.triggered.connect(self.toggle_theme)
+
+        # ================= Options Menu =================
+        m_opts = menubar.addMenu("&Options")
+        act_transfer_opts = m_opts.addAction("Transfer Options...")
+        act_transfer_opts.triggered.connect(self.open_transfer_options_dialog)
+
+        act_pref_editor = m_opts.addAction("Configure Default Applications...")
+        act_pref_editor.triggered.connect(self.configure_default_applications)
+
+        # ================= Help Menu =================
         m_help = menubar.addMenu("&Help")
         act_about = m_help.addAction("About Nova Commander")
         act_about.triggered.connect(self._show_about)
@@ -1677,6 +2428,28 @@ class MainWindow(QMainWindow):
         self.tb_refresh = toolbar.addAction("🔄 Refresh")
         self.tb_refresh.triggered.connect(self.refresh_both)
 
+        self.tb_sync = toolbar.addAction("🔄 Sync")
+        self.tb_sync.setToolTip("Synchronize Directories (Ctrl+S)")
+        self.tb_sync.triggered.connect(self.open_synchronize_dialog)
+
+        self.tb_compare = toolbar.addAction("⚖ Compare")
+        self.tb_compare.setToolTip("Compare Directories (Shift+F2)")
+        self.tb_compare.triggered.connect(self.compare_directories)
+
+        self.tb_find = toolbar.addAction("🔍 Find")
+        self.tb_find.setToolTip("Find Files (Ctrl+F)")
+        self.tb_find.triggered.connect(self.open_find_files_dialog)
+
+        self.tb_bmarks = toolbar.addAction("⭐ Bookmarks")
+        self.tb_bmarks.setToolTip("Directory Bookmarks (Ctrl+D)")
+        self.tb_bmarks.triggered.connect(self.open_bookmarks_dialog)
+
+        self.tb_custom_cmd = toolbar.addAction("⚙ Commands")
+        self.tb_custom_cmd.setToolTip("Custom Remote Commands (Ctrl+Shift+C)")
+        self.tb_custom_cmd.triggered.connect(self.open_custom_commands_dialog)
+
+        toolbar.addSeparator()
+
         self.tb_upload = toolbar.addAction("⬆ Upload")
         self.tb_upload.triggered.connect(self.upload_selected)
 
@@ -1693,19 +2466,24 @@ class MainWindow(QMainWindow):
         self.tb_rename.setToolTip("Rename selected item (F2)")
         self.tb_rename.triggered.connect(self.rename_selected)
 
-        self.tb_chmod = toolbar.addAction("🔒 Chmod")
-        self.tb_chmod.triggered.connect(self.chmod_selected)
-
-        self.tb_delete = toolbar.addAction("🗑 Delete")
-        self.tb_delete.triggered.connect(self.delete_selected)
+        self.tb_chmod = toolbar.addAction("🔒 Properties")
+        self.tb_chmod.setToolTip("Properties & Rights (F9)")
+        self.tb_chmod.triggered.connect(self.properties_selected)
 
         self.tb_mkdir = toolbar.addAction("📁 New Folder")
         self.tb_mkdir.triggered.connect(self.create_directory)
 
-        # Cloud backup hidden for now per user request
-        self.tb_cloud = toolbar.addAction("☁ Cloud Backup")
-        self.tb_cloud.triggered.connect(self.open_export_dialog)
-        self.tb_cloud.setVisible(False)
+        self.tb_symlink = toolbar.addAction("🔗 Symlink")
+        self.tb_symlink.setToolTip("New Symbolic Link")
+        self.tb_symlink.triggered.connect(self.create_symlink)
+
+        self.tb_delete = toolbar.addAction("🗑 Delete")
+        self.tb_delete.triggered.connect(self.delete_selected)
+
+        toolbar.addSeparator()
+        self.tb_theme = toolbar.addAction("🎨 Theme")
+        self.tb_theme.setToolTip("Toggle Theme (Classic WinSCP / Modern Dark)")
+        self.tb_theme.triggered.connect(self.toggle_theme)
 
     def _setup_statusbar(self):
         self.status_bar = QStatusBar()
@@ -1729,6 +2507,95 @@ class MainWindow(QMainWindow):
         """Global shortcuts are registered as window actions in _setup_menubar to avoid ambiguity."""
         pass
 
+    def keyPressEvent(self, event: QKeyEvent):
+        """Catches Ctrl+1 .. Ctrl+9 directly to guarantee tab navigation across all focus states."""
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            key = event.key()
+            if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+                idx = key - Qt.Key.Key_1
+                self.switch_to_tab(idx)
+                event.accept()
+                return
+            elif key in (Qt.Key.Key_Tab, Qt.Key.Key_PageDown):
+                self.next_session_tab()
+                event.accept()
+                return
+            elif key == Qt.Key.Key_PageUp:
+                self.prev_session_tab()
+                event.accept()
+                return
+        elif event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            if event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                self.prev_session_tab()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _on_switch_tab_action(self, target_idx: int, *args):
+        """Action handler for Ctrl+1 through Ctrl+9."""
+        self.switch_to_tab(target_idx)
+
+    def switch_to_tab(self, index: int):
+        """
+        Switches active session tab to the specified 0-based index.
+        Ctrl+1 switches to tab index 0, Ctrl+2 to index 1, etc.
+        Ctrl+9 (index 8) switches to the last tab when fewer than 9 tabs are open.
+        """
+        count = self.tab_widget.count()
+        if count == 0:
+            return
+
+        if index == 8 and count < 9:
+            target = count - 1
+        else:
+            target = index
+
+        if 0 <= target < count:
+            self.tab_widget.setCurrentIndex(target)
+
+    def next_session_tab(self):
+        """Switches to the next session tab with circular wrap-around."""
+        count = self.tab_widget.count()
+        if count > 1:
+            next_idx = (self.tab_widget.currentIndex() + 1) % count
+            self.tab_widget.setCurrentIndex(next_idx)
+
+    def prev_session_tab(self):
+        """Switches to the previous session tab with circular wrap-around."""
+        count = self.tab_widget.count()
+        if count > 1:
+            prev_idx = (self.tab_widget.currentIndex() - 1 + count) % count
+            self.tab_widget.setCurrentIndex(prev_idx)
+
+    def _refresh_tabs_menu(self):
+        """Dynamically updates the Tabs menu items with open session tab titles."""
+        count = self.tab_widget.count()
+        current_idx = self.tab_widget.currentIndex()
+
+        self.act_next_tab.setEnabled(count > 1)
+        self.act_prev_tab.setEnabled(count > 1)
+
+        for i, act in enumerate(self.tab_actions):
+            if i < count:
+                tab_name = self.tab_widget.tabText(i)
+                prefix = "✓ " if i == current_idx else "   "
+                act.setText(f"{prefix}{i+1}. {tab_name} (Ctrl+{i+1})")
+            elif i == 8 and count > 1:
+                last_name = self.tab_widget.tabText(count - 1)
+                prefix = "✓ " if (count - 1) == current_idx else "   "
+                act.setText(f"{prefix}9. Last Tab ({last_name}) (Ctrl+9)")
+            else:
+                act.setText(f"   {i+1}. Tab {i+1} (Ctrl+{i+1})")
+
+    def _update_tab_tooltips(self):
+        """Updates tooltips on each tab with shortcut hints (e.g. Ctrl+1, Ctrl+2)."""
+        count = self.tab_widget.count()
+        for i in range(count):
+            shortcut_hint = f" (Ctrl+{i+1})" if i < 9 else ""
+            tab_text = self.tab_widget.tabText(i)
+            clean_text = tab_text.split(" (Ctrl+")[0] if " (Ctrl+" in tab_text else tab_text
+            self.tab_widget.setTabToolTip(i, f"{clean_text}{shortcut_hint}")
+
     # =========================================================================
     # Multi-Session Tab Management
     # =========================================================================
@@ -1750,6 +2617,8 @@ class MainWindow(QMainWindow):
         view.progress_changed.connect(self._on_view_progress_changed)
         view.session_connected.connect(lambda t, info: self._on_view_connected(view, t, info))
         view.session_disconnected.connect(lambda: self._on_view_disconnected(view))
+
+        self._update_tab_tooltips()
 
         if session:
             view.connect_to_session(session)
@@ -1778,6 +2647,8 @@ class MainWindow(QMainWindow):
         # If all tabs closed, create an empty one
         if self.tab_widget.count() == 0:
             self.create_session_tab()
+        else:
+            self._update_tab_tooltips()
 
     def _on_tab_changed(self, index: int):
         """Updates toolbar and status bar to reflect the newly active tab."""
@@ -1800,6 +2671,8 @@ class MainWindow(QMainWindow):
             self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
             self.tb_disconnect.setEnabled(False)
 
+        self.status_bar.showMessage(f"Active Tab: {self.tab_widget.tabText(index)} [Ctrl+{index+1 if index < 9 else 9}]", 2500)
+
     def _on_view_status_message(self, msg: str):
         self.lbl_status.setText(msg)
 
@@ -1821,6 +2694,7 @@ class MainWindow(QMainWindow):
         idx = self.tab_widget.indexOf(view)
         if idx >= 0:
             self.tab_widget.setTabText(idx, f"🖥 {title}")
+            self._update_tab_tooltips()
         if self.active_session_view() == view:
             tab_info = f" [Tab {idx+1}/{self.tab_widget.count()}]"
             self.lbl_session.setText(f"🟢 {info}{tab_info}")
@@ -1831,6 +2705,7 @@ class MainWindow(QMainWindow):
         idx = self.tab_widget.indexOf(view)
         if idx >= 0:
             self.tab_widget.setTabText(idx, f"🖥 Disconnected")
+            self._update_tab_tooltips()
         if self.active_session_view() == view:
             tab_info = f" [Tab {idx+1}/{self.tab_widget.count()}]"
             self.lbl_session.setText(f"🔴 Not Connected{tab_info}")
@@ -1858,6 +2733,7 @@ class MainWindow(QMainWindow):
         if active and not active.sftp_client.is_connected and not active.current_session:
             idx = self.tab_widget.currentIndex()
             self.tab_widget.setTabText(idx, f"🖥 {session.name}")
+            self._update_tab_tooltips()
             active.connect_to_session(session)
         else:
             # Open in a new session tab
@@ -1929,9 +2805,101 @@ class MainWindow(QMainWindow):
         if view := self.active_session_view():
             view.open_terminal_window()
 
+    def properties_selected(self):
+        if view := self.active_session_view():
+            view.properties_selected()
+
+    def view_selected(self):
+        if view := self.active_session_view():
+            view.view_selected()
+
+    def copy_selected(self):
+        if view := self.active_session_view():
+            view.copy_selected()
+
+    def move_selected(self):
+        if view := self.active_session_view():
+            view.move_selected()
+
+    def create_symlink(self):
+        if view := self.active_session_view():
+            view.create_symlink()
+
+    def compare_directories(self):
+        if view := self.active_session_view():
+            view.compare_directories()
+
+    def select_by_mask(self, is_select: bool = True):
+        if view := self.active_session_view():
+            view.select_by_mask(is_select)
+
+    def invert_selection(self):
+        if view := self.active_session_view():
+            view.invert_selection()
+
+    def select_all_items(self, select: bool = True):
+        if view := self.active_session_view():
+            view.select_all_items(select)
+
+    def open_synchronize_dialog(self):
+        if view := self.active_session_view():
+            view.open_synchronize_dialog()
+
+    def open_bookmarks_dialog(self):
+        if view := self.active_session_view():
+            view.open_bookmarks_dialog()
+
+    def open_find_files_dialog(self):
+        if view := self.active_session_view():
+            view.open_find_files_dialog()
+
+    def open_custom_commands_dialog(self):
+        if view := self.active_session_view():
+            view.open_custom_commands_dialog()
+
+    def open_generate_url_dialog(self):
+        if view := self.active_session_view():
+            view.open_generate_url_dialog()
+
+    def open_transfer_options_dialog(self):
+        dlg = TransferOptionsDialog(getattr(self, "_transfer_options", {}), self)
+        def _on_save(opts):
+            self._transfer_options = opts
+            self.status_bar.showMessage("Transfer options updated.", 3000)
+        dlg.options_saved.connect(_on_save)
+        dlg.exec()
+
+    def toggle_function_bar(self):
+        self.function_bar.setVisible(not self.function_bar.isVisible())
+
+    def reconnect_active_session(self):
+        if view := self.active_session_view():
+            if view.current_session:
+                view.connect_to_session(view.current_session)
+
+    def duplicate_active_session(self):
+        if view := self.active_session_view():
+            if view.current_session:
+                self.create_session_tab(view.current_session)
+
     def refresh_both(self):
         if view := self.active_session_view():
             view.refresh_both()
+
+    def toggle_theme(self):
+        """Toggles between Classic WinSCP Light theme and Modern Dark theme live."""
+        current = getattr(self, "_current_theme_mode", "classic")
+        new_mode = "dark" if current == "classic" else "classic"
+        self._current_theme_mode = new_mode
+        try:
+            from main import apply_theme
+        except ImportError:
+            from src.main import apply_theme
+        app = QApplication.instance()
+        if app:
+            apply_theme(app, mode=new_mode)
+            theme_title = "Classic WinSCP" if new_mode == "classic" else "Modern Dark"
+            self.status_bar.showMessage(f"Theme switched to: {theme_title}", 3000)
 
     # =========================================================================
     # Compatibility Properties for Direct Access & Existing Tests

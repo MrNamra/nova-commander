@@ -13,6 +13,7 @@ from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -37,6 +39,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.session_store import SessionConfig, SessionStore
+from .advanced_site_dialog import AdvancedSiteSettingsDialog
+from .generate_url_dialog import GenerateUrlDialog
 
 
 class KeyManagerDialog(QDialog):
@@ -234,8 +238,8 @@ class SessionDialog(QDialog):
     def __init__(self, session_store: SessionStore, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.session_store = session_store
-        self.setWindowTitle("Nova Commander - Login & Saved Sessions")
-        self.resize(760, 520)
+        self.setWindowTitle("Nova Commander - Login")
+        self.resize(780, 520)
 
         self._active_config: Optional[SessionConfig] = None
         self._setup_ui()
@@ -247,14 +251,22 @@ class SessionDialog(QDialog):
         # Splitter: Left (Sessions Tree), Right (Credentials Editor)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # ----------------- Left Panel -----------------
+        # ----------------- Left Panel (Sites) -----------------
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
 
-        lbl_sites = QLabel("Saved Sites:")
+        lbl_sites = QLabel("Sites:")
         lbl_sites.setStyleSheet("font-weight: bold;")
         left_layout.addWidget(lbl_sites)
+
+        # WinSCP Incremental Search
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("🔍 Filter sites...")
+        self.txt_filter.setClearButtonEnabled(True)
+        self.txt_filter.textChanged.connect(self._filter_tree)
+        left_layout.addWidget(self.txt_filter)
 
         self.tree = SessionTreeWidget(self)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
@@ -265,8 +277,30 @@ class SessionDialog(QDialog):
         self.tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         left_layout.addWidget(self.tree)
 
-        # Left buttons: New Site, New Folder, Move, Delete
+        # WinSCP Left Action Buttons: Tools & Manage menus + direct buttons
         left_btn_layout = QHBoxLayout()
+        left_btn_layout.setSpacing(4)
+
+        self.btn_tools = QPushButton("Tools ▾")
+        tools_menu = QMenu(self)
+        tools_menu.addAction("📁 Export / Import Sessions...").triggered.connect(self.export_requested.emit)
+        tools_menu.addAction("🔗 Generate Session URL / Code...").triggered.connect(self._open_generate_url)
+        tools_menu.addAction("🔑 Manage SSH Keys...").triggered.connect(self._open_key_manager)
+        tools_menu.addAction("⚙ Advanced Site Settings...").triggered.connect(self._open_advanced_settings)
+        self.btn_tools.setMenu(tools_menu)
+        left_btn_layout.addWidget(self.btn_tools)
+
+        self.btn_manage = QPushButton("Manage ▾")
+        manage_menu = QMenu(self)
+        manage_menu.addAction("➕ New Site").triggered.connect(self._create_new_site)
+        manage_menu.addAction("📁 New Folder").triggered.connect(self._create_new_folder)
+        manage_menu.addAction("✏ Rename (F2)").triggered.connect(self._rename_selected)
+        manage_menu.addAction("📋 Clone / Duplicate Site").triggered.connect(self._clone_selected)
+        manage_menu.addAction("🗑 Delete (Del)").triggered.connect(self._delete_selected)
+        self.btn_manage.setMenu(manage_menu)
+        left_btn_layout.addWidget(self.btn_manage)
+
+        # Direct quick buttons
         self.btn_new_site = QPushButton("+ Site")
         self.btn_new_folder = QPushButton("+ Folder")
         self.btn_move = QPushButton("Move...")
@@ -280,42 +314,38 @@ class SessionDialog(QDialog):
 
         splitter.addWidget(left_widget)
 
-        # ----------------- Right Panel -----------------
+        # ----------------- Right Panel (Session Parameters) -----------------
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(10, 0, 0, 0)
 
-        # Session properties group
-        group_box = QGroupBox("Session Parameters")
+        # Session properties group matching WinSCP "Session" group
+        group_box = QGroupBox("Session")
         form = QFormLayout(group_box)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-
-        self.txt_session_name = QLineEdit("New Session")
-        form.addRow("Session Name:", self.txt_session_name)
-
-        self.cmb_folder = QComboBox()
-        self.cmb_folder.setEditable(True)
-        form.addRow("Folder:", self.cmb_folder)
 
         # Protocol & Port
         proto_layout = QHBoxLayout()
         self.cmb_protocol = QComboBox()
-        self.cmb_protocol.addItems(["SFTP", "SCP"])
+        self.cmb_protocol.addItems(["SFTP", "SCP", "FTP", "WebDAV", "Amazon S3"])
+        self.cmb_protocol.currentIndexChanged.connect(self._on_protocol_changed)
         self.spin_port = QSpinBox()
         self.spin_port.setRange(1, 65535)
         self.spin_port.setValue(22)
         proto_layout.addWidget(self.cmb_protocol, 2)
-        proto_layout.addWidget(QLabel("Port:"), 0)
+        proto_layout.addWidget(QLabel("Port number:"), 0)
         proto_layout.addWidget(self.spin_port, 1)
-        form.addRow("File Protocol:", proto_layout)
+        form.addRow("File protocol:", proto_layout)
 
         self.txt_host = QLineEdit()
         self.txt_host.setPlaceholderText("example.com or 192.168.1.100")
-        form.addRow("Host Name:", self.txt_host)
+        form.addRow("Host name:", self.txt_host)
 
+        user_pwd_layout = QHBoxLayout()
         self.txt_user = QLineEdit()
-        self.txt_user.setPlaceholderText("e.g. root, ubuntu, admin")
-        form.addRow("User Name:", self.txt_user)
+        self.txt_user.setPlaceholderText("e.g. root, ubuntu, deploy")
+        user_pwd_layout.addWidget(self.txt_user, 1)
+        form.addRow("User name:", user_pwd_layout)
 
         # Password with show/hide toggle
         pwd_layout = QHBoxLayout()
@@ -338,7 +368,7 @@ class SessionDialog(QDialog):
         self.btn_browse_key.clicked.connect(self._browse_key_file)
         key_layout.addWidget(self.txt_key_path)
         key_layout.addWidget(self.btn_browse_key)
-        form.addRow("Private Key:", key_layout)
+        form.addRow("Private key file:", key_layout)
 
         # Key Passphrase
         passphrase_layout = QHBoxLayout()
@@ -351,19 +381,47 @@ class SessionDialog(QDialog):
         self.btn_toggle_passphrase.clicked.connect(self._toggle_passphrase_visibility)
         passphrase_layout.addWidget(self.txt_passphrase)
         passphrase_layout.addWidget(self.btn_toggle_passphrase)
-        form.addRow("Key Passphrase:", passphrase_layout)
+        form.addRow("Key passphrase:", passphrase_layout)
 
-        # Directory settings
+        self.txt_session_name = QLineEdit("New Site")
+        form.addRow("Site Name:", self.txt_session_name)
+
+        self.cmb_folder = QComboBox()
+        self.cmb_folder.setEditable(True)
+        form.addRow("Folder:", self.cmb_folder)
+
+        # Initial Directories
         self.txt_remote_dir = QLineEdit("/")
-        form.addRow("Remote Dir:", self.txt_remote_dir)
+        form.addRow("Remote directory:", self.txt_remote_dir)
 
         self.txt_local_dir = QLineEdit(str(Path.home()))
-        form.addRow("Local Dir:", self.txt_local_dir)
+        form.addRow("Local directory:", self.txt_local_dir)
 
         self.txt_comment = QLineEdit()
         form.addRow("Comment:", self.txt_comment)
 
+        # Session actions inside group box matching WinSCP
+        session_btn_layout = QHBoxLayout()
+        self.btn_advanced = QPushButton("⚙ Advanced...")
+        self.btn_advanced.setToolTip("Advanced site settings (SSH, keepalive, compression, proxy)")
+        self.btn_save = QPushButton("💾 Save...")
+        self.btn_save.setToolTip("Save session parameters")
+        session_btn_layout.addStretch()
+        session_btn_layout.addWidget(self.btn_advanced)
+        session_btn_layout.addWidget(self.btn_save)
+        form.addRow("", session_btn_layout)
+
         right_layout.addWidget(group_box)
+
+        # WinSCP NoteGroup
+        note_group = QGroupBox("Note")
+        note_layout = QVBoxLayout(note_group)
+        note_layout.setContentsMargins(6, 6, 6, 6)
+        self.txt_note = QTextEdit()
+        self.txt_note.setPlaceholderText("Notes or comments for this session...")
+        self.txt_note.setMaximumHeight(70)
+        note_layout.addWidget(self.txt_note)
+        right_layout.addWidget(note_group)
         right_layout.addStretch()
 
         splitter.addWidget(right_widget)
@@ -371,21 +429,28 @@ class SessionDialog(QDialog):
         splitter.setStretchFactor(1, 2)
         main_layout.addWidget(splitter)
 
+        # WinSCP Show Again Checkbox
+        self.chk_show_on_startup = QCheckBox("&Show Login dialog on startup and when the last session is closed")
+        self.chk_show_on_startup.setChecked(True)
+        main_layout.addWidget(self.chk_show_on_startup)
+
         # ----------------- Bottom Action Bar -----------------
         bottom_layout = QHBoxLayout()
 
-        self.btn_cloud = QPushButton("📁 Export / Import Sessions")
+        self.btn_cloud = QPushButton("📁 Export / Import")
         self.btn_manage_keys = QPushButton("🔑 Manage Keys")
-        self.btn_save = QPushButton("💾 Save Session")
+        self.btn_gen_url = QPushButton("🔗 URL")
+        self.btn_gen_url.setToolTip("Generate Session URL / Code")
+
         self.btn_login = QPushButton("🚀 Login")
         self.btn_login.setDefault(True)
-        self.btn_login.setStyleSheet("font-weight: bold; padding: 6px 16px; background-color: #238636; color: white;")
+        self.btn_login.setStyleSheet("font-weight: bold; padding: 6px 18px; background-color: #238636; color: white;")
         self.btn_cancel = QPushButton("Close")
 
         bottom_layout.addWidget(self.btn_cloud)
         bottom_layout.addWidget(self.btn_manage_keys)
+        bottom_layout.addWidget(self.btn_gen_url)
         bottom_layout.addStretch()
-        bottom_layout.addWidget(self.btn_save)
         bottom_layout.addWidget(self.btn_login)
         bottom_layout.addWidget(self.btn_cancel)
 
@@ -400,7 +465,52 @@ class SessionDialog(QDialog):
         self.btn_login.clicked.connect(self._on_login)
         self.btn_cloud.clicked.connect(self.export_requested.emit)
         self.btn_manage_keys.clicked.connect(self._open_key_manager)
+        self.btn_advanced.clicked.connect(self._open_advanced_settings)
+        self.btn_gen_url.clicked.connect(self._open_generate_url)
         self.btn_cancel.clicked.connect(self.reject)
+
+    def _on_protocol_changed(self, index: int):
+        proto = self.cmb_protocol.currentText()
+        if proto == "FTP":
+            if self.spin_port.value() == 22:
+                self.spin_port.setValue(21)
+        elif proto in ("SFTP", "SCP"):
+            if self.spin_port.value() == 21:
+                self.spin_port.setValue(22)
+
+    def _filter_tree(self, text: str):
+        query = text.strip().lower()
+
+        def _filter_item(item: QTreeWidgetItem) -> bool:
+            match = False
+            item_text = item.text(0).lower()
+            if query in item_text:
+                match = True
+            child_matches = False
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if _filter_item(child):
+                    child_matches = True
+            is_visible = match or child_matches
+            item.setHidden(not is_visible)
+            if child_matches:
+                item.setExpanded(True)
+            return is_visible
+
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            _filter_item(root.child(i))
+
+    def _clone_selected(self):
+        cfg = self._get_current_fields_config()
+        if not cfg.host:
+            QMessageBox.information(self, "No Site Selected", "Please select or configure a site to clone.")
+            return
+        new_name = f"{cfg.name} (Copy)"
+        clone_cfg = SessionConfig.from_dict(cfg.to_dict())
+        clone_cfg.name = new_name
+        self.session_store.save_session(clone_cfg)
+        self.refresh_session_tree(select_session_name=new_name)
 
     def _refresh_folder_combo(self, selected_folder: str = ""):
         """Populates the Folder dropdown with all existing folders and selects the current one."""
@@ -434,6 +544,13 @@ class SessionDialog(QDialog):
         root_node = QTreeWidgetItem(self.tree, ["📁 Saved Sessions"])
         root_node.setData(0, Qt.ItemDataRole.UserRole, {"type": "root", "name": ""})
         root_node.setExpanded(True)
+
+        # "➕ New Site" item matching WinSCP Login.dfm
+        new_site_node = QTreeWidgetItem(root_node, ["➕ New Site"])
+        new_site_node.setData(0, Qt.ItemDataRole.UserRole, {"type": "new_site", "name": "New Site"})
+        ns_font = new_site_node.font(0)
+        ns_font.setBold(True)
+        new_site_node.setFont(0, ns_font)
 
         # 1. Register all folder items (even empty ones)
         for folder_name in folders:
@@ -480,7 +597,9 @@ class SessionDialog(QDialog):
         if not data:
             return
 
-        if data.get("type") == "session":
+        if data.get("type") in ("root", "new_site"):
+            self._create_new_site()
+        elif data.get("type") == "session":
             s: SessionConfig = data["config"]
             self._load_session_into_fields(s)
 
@@ -498,6 +617,8 @@ class SessionDialog(QDialog):
         self.txt_remote_dir.setText(s.remote_dir or "/")
         self.txt_local_dir.setText(s.local_dir or str(Path.home()))
         self.txt_comment.setText(s.comment or "")
+        if hasattr(self, "txt_note"):
+            self.txt_note.setPlainText(s.comment or "")
 
     def _create_new_site(self, prefill_folder: str = ""):
         self.txt_session_name.setText("New Session")
@@ -512,6 +633,8 @@ class SessionDialog(QDialog):
         self.txt_remote_dir.setText("/")
         self.txt_local_dir.setText(str(Path.home()))
         self.txt_comment.clear()
+        if hasattr(self, "txt_note"):
+            self.txt_note.clear()
         self.txt_host.setFocus()
         self._active_config = None
 
@@ -800,6 +923,18 @@ class SessionDialog(QDialog):
         if folder_text in ("(Root / None)", "(Root)", "None", "/"):
             folder_text = ""
         folder = folder_text.strip("/")
+
+        cfg = self._active_config
+        ping_interval = cfg.ping_interval if cfg else 30
+        compression = cfg.compression if cfg else False
+        utf8_encoding = cfg.utf8_encoding if cfg else "Auto"
+        sftp_server_cmd = cfg.sftp_server_cmd if cfg else ""
+        proxy_type = cfg.proxy_type if cfg else "None"
+        proxy_host = cfg.proxy_host if cfg else ""
+        proxy_port = cfg.proxy_port if cfg else 1080
+        proxy_user = cfg.proxy_user if cfg else ""
+        proxy_password = cfg.proxy_password if cfg else ""
+
         return SessionConfig(
             name=name,
             host=self.txt_host.text().strip(),
@@ -812,8 +947,28 @@ class SessionDialog(QDialog):
             remote_dir=self.txt_remote_dir.text().strip() or "/",
             local_dir=self.txt_local_dir.text().strip() or str(Path.home()),
             folder=folder,
-            comment=self.txt_comment.text().strip(),
+            comment=self.txt_note.toPlainText().strip() if hasattr(self, "txt_note") and self.txt_note.toPlainText().strip() else self.txt_comment.text().strip(),
+            ping_interval=ping_interval,
+            compression=compression,
+            utf8_encoding=utf8_encoding,
+            sftp_server_cmd=sftp_server_cmd,
+            proxy_type=proxy_type,
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            proxy_user=proxy_user,
+            proxy_password=proxy_password,
         )
+
+    def _open_advanced_settings(self):
+        cfg = self._get_current_fields_config()
+        dlg = AdvancedSiteSettingsDialog(cfg, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._load_session_into_fields(cfg)
+
+    def _open_generate_url(self):
+        cfg = self._get_current_fields_config()
+        dlg = GenerateUrlDialog(cfg, current_path=cfg.remote_dir, parent=self)
+        dlg.exec()
 
     def _save_current_session(self):
         cfg = self._get_current_fields_config()

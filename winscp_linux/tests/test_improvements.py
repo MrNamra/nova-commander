@@ -605,3 +605,49 @@ def test_f2_and_ctrl_p_window_actions(qapp):
     assert ctrl_p_count == 1, f"Expected 1 Ctrl+P shortcut, found {ctrl_p_count} (causes ambiguity)!"
     win.close()
 
+
+def test_session_dialog_opens_by_default_on_startup(qapp, tmp_path, monkeypatch):
+    """Verifies that the Login & Saved Sessions dialog is opened by default on startup, even with saved sessions."""
+    from src.core.session_store import SessionConfig, SessionStore
+    from src.main import main
+    from PyQt6.QtCore import QTimer
+
+    store_file = tmp_path / "sessions.ini"
+    store = SessionStore(storage_path=store_file)
+    store.save_session(SessionConfig(name="test-server", host="192.168.1.50"))
+    assert len(store.list_sessions()) == 1
+
+    dialog_opened = []
+
+    # Intercept SessionStore instantiation to point to test store
+    monkeypatch.setattr("src.main.SessionStore", lambda: store)
+
+    # Intercept open_session_dialog on MainWindow to verify it gets called
+    from src.ui.main_window import MainWindow
+    original_open = MainWindow.open_session_dialog
+    def mock_open(self):
+        dialog_opened.append(True)
+    monkeypatch.setattr(MainWindow, "open_session_dialog", mock_open)
+
+    captured_windows = []
+    original_init = MainWindow.__init__
+    def mock_init(self, *args, **kwargs):
+        captured_windows.append(self)
+        original_init(self, *args, **kwargs)
+    monkeypatch.setattr(MainWindow, "__init__", mock_init)
+
+    # Intercept app.exec to avoid blocking event loop
+    monkeypatch.setattr("PyQt6.QtWidgets.QApplication.exec", lambda self: 0)
+    monkeypatch.setattr("sys.exit", lambda code=0: None)
+
+    main()
+
+    # Process pending events so QTimer.singleShot(0, ...) fires
+    qapp.processEvents()
+
+    assert len(dialog_opened) == 1, "Session dialog should have been opened by default on app startup!"
+    for w in captured_windows:
+        w.close()
+
+
+
