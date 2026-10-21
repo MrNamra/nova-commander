@@ -97,6 +97,13 @@ from .symlink_dialog import SymlinkDialog
 from .synchronize_dialog import SynchronizeDialog
 from .terminal_widget import SSHTerminalWindow
 from .transfer_options_dialog import TransferOptionsDialog
+from ..core.transfer_queue import (
+    TransferJob,
+    TransferPriority,
+    TransferQueueEngine,
+    TransferStatus,
+)
+from .transfer_queue_widget import TransferQueueWidget
 
 
 class ChmodDialog(QDialog):
@@ -460,6 +467,7 @@ class SessionCommanderView(QWidget):
         self.sftp_client = SFTPClient()
         self.ssh_shell = SSHShellClient(self)
         self.sync_engine = SyncEngine(self)
+        self.queue_engine = TransferQueueEngine(self.sftp_client, self)
 
         self.current_session: Optional[SessionConfig] = None
         self.session_id: str = "default"
@@ -467,6 +475,7 @@ class SessionCommanderView(QWidget):
 
         self._setup_ui()
         self._wire_sync_engine()
+        self._wire_queue_engine()
 
         # Load initial local directory
         init_dir = initial_local_dir or str(Path.home())
@@ -477,9 +486,13 @@ class SessionCommanderView(QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
+        # Vertical Splitter: Top (Dual-Pane Commander), Bottom (Transfer Queue)
+        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
+        layout.addWidget(self.v_splitter, 1)
+
         # Dual-Pane layout
         self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(self.h_splitter, 1)
+        self.v_splitter.addWidget(self.h_splitter)
 
         # === Left Panel: Local Filesystem ===
         left_widget = QWidget()
@@ -633,6 +646,14 @@ class SessionCommanderView(QWidget):
         self.h_splitter.setStretchFactor(0, 1)
         self.h_splitter.setStretchFactor(1, 1)
 
+        # Bottom Transfer Queue Panel (Scrollable, complete percentage, pause, cancel, priority)
+        self.queue_widget = TransferQueueWidget(self.queue_engine, self)
+        self.queue_widget.close_requested.connect(self.hide_transfer_queue)
+        self.v_splitter.addWidget(self.queue_widget)
+        self.queue_widget.hide()
+        self.v_splitter.setStretchFactor(0, 4)
+        self.v_splitter.setStretchFactor(1, 1)
+
         # WinSCP Command Line Bar (Commander mode)
         cmd_panel = QHBoxLayout()
         cmd_panel.setContentsMargins(2, 2, 2, 2)
@@ -692,6 +713,44 @@ class SessionCommanderView(QWidget):
         self.sync_engine.sync_failed.connect(
             lambda r, err: self.status_message.emit(f"❌ Auto-sync failed for {r}: {err}")
         )
+
+    def _wire_queue_engine(self):
+        self.queue_engine.queue_finished.connect(self._on_queue_finished)
+        self.queue_engine.error_occurred.connect(
+            lambda jid, err: self.status_message.emit(f"❌ Transfer error for job {jid}: {err}")
+        )
+        self.queue_engine.job_status_changed.connect(self._on_queue_job_status_changed)
+
+    def _on_queue_finished(self):
+        self.status_message.emit("✔ All queued transfers completed.")
+        self.refresh_both()
+
+    def _on_queue_job_status_changed(self, jid: str, st: str):
+        job = self.queue_engine.get_job(jid)
+        if job and st == TransferStatus.RUNNING:
+            self.status_message.emit(f"Transferring {job.name} ({job.direction})...")
+        elif job and st == TransferStatus.COMPLETED:
+            self.status_message.emit(f"✔ Completed {job.name}")
+
+    def show_transfer_queue(self):
+        """Displays and expands the bottom transfer queue panel."""
+        if self.queue_widget.isHidden():
+            self.queue_widget.show()
+            total_h = self.v_splitter.height() or 500
+            q_h = min(240, max(140, total_h // 3))
+            self.v_splitter.setSizes([total_h - q_h, q_h])
+        self.queue_widget.refresh_queue()
+
+    def hide_transfer_queue(self):
+        """Hides the bottom transfer queue panel."""
+        self.queue_widget.hide()
+
+    def toggle_transfer_queue(self):
+        """Toggles visibility of the bottom transfer queue panel."""
+        if not self.queue_widget.isHidden():
+            self.hide_transfer_queue()
+        else:
+            self.show_transfer_queue()
 
     def _open_bookmarks(self):
         main_win = self.window()
@@ -824,6 +883,9 @@ class SessionCommanderView(QWidget):
 
     def cleanup(self):
         """Gracefully tears down this session view and all background watchers."""
+        if hasattr(self, "queue_engine"):
+            self.queue_engine.stop()
+            self.queue_engine.wait(500)
         self.sftp_client.disconnect()
         self.ssh_shell.close()
         self.sync_engine.cleanup_session(self.session_id)
@@ -1145,33 +1207,9 @@ class SessionCommanderView(QWidget):
         if not transfers:
             return
 
-        total_items = len(transfers)
-        self.progress_changed.emit(0)
-
-        worker = SFTPBatchTransferWorker(self.sftp_client, transfers)
-        self._active_worker = worker
-
-        def _on_started(name: str, idx: int, total: int):
-            self.status_message.emit(f"Transferring ({idx}/{total}): {name}...")
-            self.progress_changed.emit(int(((idx - 1) / total) * 100))
-
-        def _on_finish(count: int):
-            self.progress_changed.emit(100)
-            self.status_message.emit(f"✔ Completed transfer of {count} item(s) successfully.")
-            if refresh_pane == "remote":
-                self._load_remote_directory(self.txt_remote_path.text())
-            else:
-                self._load_local_directory(self.txt_local_path.text())
-
-        def _on_fail(err: str):
-            self.progress_changed.emit(0)
-            self.status_message.emit("Transfer failed.")
-            QMessageBox.critical(self, "Transfer Error", f"Transfer failed:\n{err}")
-
-        worker.item_started.connect(_on_started)
-        worker.finished.connect(_on_finish)
-        worker.failed.connect(_on_fail)
-        worker.start()
+        created_jobs = self.queue_engine.add_transfers(transfers)
+        self.show_transfer_queue()
+        self.status_message.emit(f"Added {len(created_jobs)} item(s) to transfer queue.")
 
     def _handle_items_dropped(self, drop_data: dict):
         source_pane = drop_data["source_pane"]
@@ -2390,6 +2428,12 @@ class MainWindow(QMainWindow):
         act_toggle_fbar = m_view.addAction("Toggle Function Keys Bar")
         act_toggle_fbar.triggered.connect(self.toggle_function_bar)
 
+        act_toggle_queue = m_view.addAction("📥 Transfer Queue (Ctrl+Q)")
+        act_toggle_queue.setShortcut(QKeySequence("Ctrl+Q"))
+        act_toggle_queue.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_toggle_queue.triggered.connect(self.toggle_transfer_queue)
+        self.addAction(act_toggle_queue)
+
         act_toggle_theme = m_view.addAction("🎨 Toggle Theme (Classic WinSCP / Dark)")
         act_toggle_theme.triggered.connect(self.toggle_theme)
 
@@ -2481,6 +2525,10 @@ class MainWindow(QMainWindow):
         self.tb_delete.triggered.connect(self.delete_selected)
 
         toolbar.addSeparator()
+        self.tb_queue = toolbar.addAction("📥 Queue")
+        self.tb_queue.setToolTip("Show / Hide Transfer Queue Panel (Ctrl+Q)")
+        self.tb_queue.triggered.connect(self.toggle_transfer_queue)
+
         self.tb_theme = toolbar.addAction("🎨 Theme")
         self.tb_theme.setToolTip("Toggle Theme (Classic WinSCP / Modern Dark)")
         self.tb_theme.triggered.connect(self.toggle_theme)
@@ -2671,7 +2719,7 @@ class MainWindow(QMainWindow):
             self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #888888;")
             self.tb_disconnect.setEnabled(False)
 
-        self.status_bar.showMessage(f"Active Tab: {self.tab_widget.tabText(index)} [Ctrl+{index+1 if index < 9 else 9}]", 2500)
+        self.lbl_status.setText(f"Active Tab: {self.tab_widget.tabText(index)} [Ctrl+{index+1 if index < 9 else 9}]")
 
     def _on_view_status_message(self, msg: str):
         self.lbl_status.setText(msg)
@@ -2871,6 +2919,16 @@ class MainWindow(QMainWindow):
 
     def toggle_function_bar(self):
         self.function_bar.setVisible(not self.function_bar.isVisible())
+
+    def toggle_transfer_queue(self):
+        """Toggles the visibility of the bottom transfer queue in active session view."""
+        if view := self.active_session_view():
+            view.toggle_transfer_queue()
+
+    def show_transfer_queue(self):
+        """Shows and expands the bottom transfer queue in active session view."""
+        if view := self.active_session_view():
+            view.show_transfer_queue()
 
     def reconnect_active_session(self):
         if view := self.active_session_view():

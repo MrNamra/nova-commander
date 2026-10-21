@@ -4,6 +4,7 @@ from .main_window import MainWindow
 from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog
 from .session_dialog import KeyManagerDialog, SessionDialog
 from .terminal_widget import TerminalWidget
+from .transfer_queue_widget import TransferQueueWidget
 
 __all__ = [
     "ExportDialog",
@@ -11,6 +12,7 @@ __all__ = [
     "KeyManagerDialog",
     "SessionDialog",
     "TerminalWidget",
+    "TransferQueueWidget",
     "OpenWithDialog",
     "EditorPreferencesDialog",
 ]

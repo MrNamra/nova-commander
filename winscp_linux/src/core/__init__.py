@@ -13,6 +13,12 @@ from .sftp_client import (
 )
 from .ssh_client import SSHShellClient
 from .sync_engine import SyncEngine
+from .transfer_queue import (
+    TransferJob,
+    TransferPriority,
+    TransferQueueEngine,
+    TransferStatus,
+)
 
 __all__ = [
     "EditorInfo",
@@ -30,4 +36,8 @@ __all__ = [
     "SFTPUploadWorker",
     "SSHShellClient",
     "SyncEngine",
+    "TransferJob",
+    "TransferPriority",
+    "TransferQueueEngine",
+    "TransferStatus",
 ]
