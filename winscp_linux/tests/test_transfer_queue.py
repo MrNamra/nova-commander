@@ -243,3 +243,142 @@ def test_main_window_queue_toolbar_and_menu(qapp):
     assert view.queue_widget.isHidden() is True
 
     win.close()
+
+
+def test_transfer_job_display_name():
+    """Verifies display_name reflects active sub-file path and indices during directory transfers."""
+    file_job = TransferJob(
+        source="/local/test.txt",
+        dest="/remote/test.txt",
+        is_dir=False,
+    )
+    assert file_job.display_name == "test.txt"
+
+    dir_job = TransferJob(
+        source="/local/project/.git",
+        dest="/remote/project/.git",
+        is_dir=True,
+    )
+    assert dir_job.display_name == ".git"
+
+    # Queued with known file count
+    dir_job.total_files = 322
+    assert dir_job.display_name == ".git (322 files)"
+
+    # Running with active sub-file and index
+    dir_job.status = TransferStatus.RUNNING
+    dir_job.current_file = "objects/4a/abcdef1234"
+    dir_job.current_file_idx = 45
+    assert dir_job.display_name == ".git ➔ objects/4a/abcdef1234 [45/322]"
+
+    # Completed
+    dir_job.status = TransferStatus.COMPLETED
+    assert dir_job.display_name == ".git ✔ (322 files)"
+
+    # Cancelled
+    dir_job.status = TransferStatus.CANCELLED
+    assert dir_job.display_name == ".git ⏸ (Stopped at: objects/4a/abcdef1234)"
+
+    # Failed
+    dir_job.status = TransferStatus.FAILED
+    assert dir_job.display_name == ".git ❌ (Failed at: objects/4a/abcdef1234)"
+
+
+def test_transfer_queue_widget_directory_display_and_job_updated(qapp, tmp_path: Path):
+    """Verifies TransferQueueWidget updates Column 2 with sub-file path on job_updated signal."""
+    mock_sftp = MagicMock(spec=SFTPClient)
+    engine = TransferQueueEngine(mock_sftp)
+    engine.pause_all()
+    try:
+        widget = TransferQueueWidget(engine)
+        job = engine.add_transfer(
+            str(tmp_path / ".git"),
+            "/remote/.git",
+            is_dir=True,
+            direction="upload",
+        )
+        widget.refresh_queue()
+
+        # Initially shows folder name
+        it_name = widget.table.item(0, 2)
+        assert it_name is not None
+        assert it_name.text() == ".git"
+
+        # Simulate job running and sub-file update
+        job.status = TransferStatus.RUNNING
+        job.total_files = 150
+        job.current_file = "hooks/pre-commit"
+        job.current_file_idx = 10
+        engine.job_updated.emit(job)
+
+        # Verify Column 2 updated dynamically
+        it_name = widget.table.item(0, 2)
+        assert it_name.text() == ".git ➔ hooks/pre-commit [10/150]"
+        assert "hooks/pre-commit" in it_name.toolTip()
+    finally:
+        engine.stop()
+        engine.wait(500)
+
+
+def test_concurrent_transfers_configuration_and_widget_sync(qapp):
+    """Verifies that max_concurrent transfers can be configured and syncs between engine and widget."""
+    mock_sftp = MagicMock(spec=SFTPClient)
+    engine = TransferQueueEngine(mock_sftp)
+    engine.pause_all()
+    try:
+        assert engine.max_concurrent >= 1
+        engine.set_max_concurrent(4)
+        assert engine.max_concurrent == 4
+
+        widget = TransferQueueWidget(engine)
+        assert hasattr(widget, "spin_parallel")
+        assert widget.spin_parallel.value() == 4
+
+        # Changing widget spinbox updates engine
+        widget.spin_parallel.setValue(3)
+        assert engine.max_concurrent == 3
+
+        # Changing engine updates widget
+        engine.set_max_concurrent(5)
+        assert widget.spin_parallel.value() == 5
+    finally:
+        engine.stop()
+        engine.wait(500)
+
+
+def test_concurrent_folder_upload(tmp_path: Path):
+    """Verifies concurrent directory upload handles multiple files with hooks."""
+    mock_sftp = MagicMock(spec=SFTPClient)
+    mock_sftp.is_connected = True
+    # Return mock_sftp for get_worker_client
+    mock_sftp.get_worker_client.return_value = mock_sftp
+
+    # Create dummy folder with 4 files
+    test_dir = tmp_path / "parallel_folder"
+    test_dir.mkdir()
+    for i in range(4):
+        (test_dir / f"file_{i}.txt").write_text(f"content {i}" * 10)
+
+    engine = TransferQueueEngine(mock_sftp)
+    engine.pause_all()
+    try:
+        engine.set_max_concurrent(3)
+        assert engine.max_concurrent == 3
+
+        job = engine.add_transfer(str(test_dir), "/remote/parallel_folder", is_dir=True, direction="upload")
+        assert job.is_dir is True
+
+        progress_calls = []
+        def _cb(tx, tot):
+            progress_calls.append((tx, tot))
+
+        engine._upload_dir_with_hooks(job, _cb, client=mock_sftp)
+
+        assert mock_sftp.upload_file.call_count >= 4
+        assert job.total_files == 4
+        assert len(progress_calls) >= 4
+    finally:
+        engine.stop()
+        engine.wait(500)
+
+

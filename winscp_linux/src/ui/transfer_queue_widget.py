@@ -10,7 +10,7 @@ Displays queued and active file transfers at the bottom of the window with:
 """
 
 from typing import Dict, Optional
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSettings, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -122,10 +123,25 @@ class TransferQueueWidget(QWidget):
         self.btn_close.setStyleSheet("QPushButton { font-weight: bold; }")
         self.btn_close.clicked.connect(self.close_requested.emit)
 
+        # Simultaneous / Parallel transfer limit control
+        lbl_parallel = QLabel("⚡ Parallel:")
+        lbl_parallel.setStyleSheet("font-size: 11px; font-weight: bold; margin-left: 2px;")
+        lbl_parallel.setToolTip("Maximum number of files/transfers to process simultaneously (1 - 10)")
+
+        self.spin_parallel = QSpinBox()
+        self.spin_parallel.setRange(1, 10)
+        self.spin_parallel.setValue(self.queue_engine.max_concurrent)
+        self.spin_parallel.setToolTip("Configure how many files transfer simultaneously (1 - 10)")
+        self.spin_parallel.setFixedHeight(26)
+        self.spin_parallel.setFixedWidth(52)
+        self.spin_parallel.valueChanged.connect(self._on_parallel_changed)
+
         header.addWidget(self.btn_pause_all)
         header.addWidget(self.btn_move_up)
         header.addWidget(self.btn_move_down)
         header.addWidget(self.btn_priority)
+        header.addWidget(lbl_parallel)
+        header.addWidget(self.spin_parallel)
         header.addWidget(self.btn_clear)
         header.addWidget(self.btn_cancel_all)
         header.addWidget(self.btn_close)
@@ -173,6 +189,18 @@ class TransferQueueWidget(QWidget):
         self.queue_engine.job_progress.connect(self._on_job_progress)
         self.queue_engine.job_status_changed.connect(self._on_job_status_changed)
         self.queue_engine.queue_progress.connect(self._on_queue_progress)
+        self.queue_engine.job_updated.connect(self._on_job_updated)
+        self.queue_engine.max_concurrent_changed.connect(self._sync_parallel_spin)
+
+    def _on_parallel_changed(self, val: int):
+        self.queue_engine.set_max_concurrent(val)
+        QSettings("NovaCommander", "WinSCP-Linux").setValue("transfers/max_concurrent", val)
+
+    def _sync_parallel_spin(self, val: int):
+        if self.spin_parallel.value() != val:
+            self.spin_parallel.blockSignals(True)
+            self.spin_parallel.setValue(val)
+            self.spin_parallel.blockSignals(False)
 
     # =========================================================================
     # Rendering & Refreshing Queue
@@ -209,10 +237,13 @@ class TransferQueueWidget(QWidget):
             it_type.setData(Qt.ItemDataRole.UserRole, job.job_id)
             self.table.setItem(row, 1, it_type)
 
-            # Col 2: Name & Source/Dest tooltip
-            it_name = QTableWidgetItem(job.name)
+            # Col 2: Name & Source/Dest tooltip (showing active relative file path if directory)
+            it_name = QTableWidgetItem(job.display_name)
             it_name.setFont(QFont("Sans", weight=QFont.Weight.Bold))
-            it_name.setToolTip(f"Source: {job.source}\nDestination: {job.dest}")
+            tooltip = f"Source: {job.source}\nDestination: {job.dest}"
+            if job.current_file:
+                tooltip += f"\nProcessing: {job.current_file}"
+            it_name.setToolTip(tooltip)
             self.table.setItem(row, 2, it_name)
 
             # Col 3: Size
@@ -298,6 +329,16 @@ class TransferQueueWidget(QWidget):
         if not job:
             return
 
+        # Update Name (keeps sub-file path in sync for directory transfers)
+        if job.is_dir:
+            it_name = self.table.item(row, 2)
+            if it_name and it_name.text() != job.display_name:
+                it_name.setText(job.display_name)
+                tooltip = f"Source: {job.source}\nDestination: {job.dest}"
+                if job.current_file:
+                    tooltip += f"\nProcessing: {job.current_file}"
+                it_name.setToolTip(tooltip)
+
         # Update Size
         it_size = self.table.item(row, 3)
         if it_size:
@@ -319,11 +360,41 @@ class TransferQueueWidget(QWidget):
         if it_eta:
             it_eta.setText(job.eta_str)
 
+    def _on_job_updated(self, job: TransferJob):
+        """Called when job properties (like active processing file or total file count) are updated."""
+        if not job:
+            return
+        row = self._row_map.get(job.job_id)
+        if row is None or row >= self.table.rowCount():
+            return
+
+        it_name = self.table.item(row, 2)
+        if it_name:
+            it_name.setText(job.display_name)
+            tooltip = f"Source: {job.source}\nDestination: {job.dest}"
+            if job.current_file:
+                tooltip += f"\nProcessing: {job.current_file}"
+            it_name.setToolTip(tooltip)
+
+        it_size = self.table.item(row, 3)
+        if it_size:
+            it_size.setText(job.size_str)
+
     def _on_job_status_changed(self, job_id: str, status: str):
-        """Updates status cell and action buttons when a job's status transitions."""
+        """Updates status cell, display name, and action buttons when a job's status transitions."""
         row = self._row_map.get(job_id)
         if row is None or row >= self.table.rowCount():
             return
+
+        job = self.queue_engine.get_job(job_id)
+        if job:
+            it_name = self.table.item(row, 2)
+            if it_name:
+                it_name.setText(job.display_name)
+                tooltip = f"Source: {job.source}\nDestination: {job.dest}"
+                if job.current_file:
+                    tooltip += f"\nProcessing: {job.current_file}"
+                it_name.setToolTip(tooltip)
 
         it_status = self.table.item(row, 8)
         if it_status:

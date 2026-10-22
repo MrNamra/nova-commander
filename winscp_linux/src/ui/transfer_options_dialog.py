@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QSettings, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -35,7 +35,7 @@ class TransferOptionsDialog(QDialog):
         self.options = current_options or {}
 
         self.setWindowTitle("Transfer Options")
-        self.resize(500, 300)
+        self.resize(500, 320)
 
         self._setup_ui()
 
@@ -63,6 +63,14 @@ class TransferOptionsDialog(QDialog):
         self.spin_speed_limit.setSuffix(" KB/s (0 = unlimited)")
         form.addRow("Speed Limit:", self.spin_speed_limit)
 
+        self.spin_parallel = QSpinBox()
+        self.spin_parallel.setRange(1, 10)
+        saved_concurrency = int(self.options.get("max_concurrent") or QSettings("NovaCommander", "WinSCP-Linux").value("transfers/max_concurrent", 2))
+        self.spin_parallel.setValue(saved_concurrency)
+        self.spin_parallel.setSuffix(" files")
+        self.spin_parallel.setToolTip("Maximum number of files/transfers to process simultaneously (1 - 10)")
+        form.addRow("Simultaneous Transfers:", self.spin_parallel)
+
         layout.addWidget(group)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -76,6 +84,7 @@ class TransferOptionsDialog(QDialog):
             "preserve_timestamps": self.chk_preserve_time.isChecked(),
             "exclude_masks": self.txt_exclude_masks.text().strip(),
             "speed_limit_kb": self.spin_speed_limit.value(),
+            "max_concurrent": self.spin_parallel.value(),
         }
         self.options_saved.emit(opts)
         self.accept()

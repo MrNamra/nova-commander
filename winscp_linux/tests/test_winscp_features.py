@@ -350,9 +350,11 @@ def test_transfer_options_dialog(qapp):
     assert dlg.cmb_mode.currentText() == "Binary"
     assert dlg.chk_preserve_time.isChecked() is True
     assert dlg.spin_speed_limit.value() == 2048
+    assert dlg.spin_parallel.value() >= 1
 
     dlg.cmb_mode.setCurrentText("Text / ASCII")
     dlg.spin_speed_limit.setValue(512)
+    dlg.spin_parallel.setValue(4)
 
     saved = {}
     dlg.options_saved.connect(lambda opts: saved.update(opts))
@@ -360,6 +362,7 @@ def test_transfer_options_dialog(qapp):
 
     assert saved["mode"] == "Text / ASCII"
     assert saved["speed_limit_kb"] == 512
+    assert saved["max_concurrent"] == 4
 
 
 def test_folder_single_click_selects_and_double_click_enters(qapp, tmp_path: Path):

@@ -722,6 +722,7 @@ class SessionCommanderView(QWidget):
             lambda jid, err: self.status_message.emit(f"❌ Transfer error for job {jid}: {err}")
         )
         self.queue_engine.job_status_changed.connect(self._on_queue_job_status_changed)
+        self.queue_engine.job_updated.connect(self._on_queue_job_updated)
 
     def _on_queue_finished(self):
         self.status_message.emit("✔ All queued transfers completed.")
@@ -730,9 +731,13 @@ class SessionCommanderView(QWidget):
     def _on_queue_job_status_changed(self, jid: str, st: str):
         job = self.queue_engine.get_job(jid)
         if job and st == TransferStatus.RUNNING:
-            self.status_message.emit(f"Transferring {job.name} ({job.direction})...")
+            self.status_message.emit(f"Transferring {job.display_name} ({job.direction})...")
         elif job and st == TransferStatus.COMPLETED:
-            self.status_message.emit(f"✔ Completed {job.name}")
+            self.status_message.emit(f"✔ Completed {job.display_name}")
+
+    def _on_queue_job_updated(self, job: TransferJob):
+        if job and job.status == TransferStatus.RUNNING and job.is_dir and job.current_file:
+            self.status_message.emit(f"Transferring {job.display_name} ({job.direction})...")
 
     def show_transfer_queue(self):
         """Displays and expands the bottom transfer queue panel."""
@@ -2968,10 +2973,20 @@ class MainWindow(QMainWindow):
             view.open_generate_url_dialog()
 
     def open_transfer_options_dialog(self):
-        dlg = TransferOptionsDialog(getattr(self, "_transfer_options", {}), self)
-        def _on_save(opts):
-            self._transfer_options = opts
-            self.status_bar.showMessage("Transfer options updated.", 3000)
+        opts = dict(getattr(self, "_transfer_options", {}))
+        if view := self.active_session_view():
+            opts["max_concurrent"] = view.queue_engine.max_concurrent
+        dlg = TransferOptionsDialog(opts, self)
+        def _on_save(new_opts):
+            self._transfer_options = new_opts
+            max_c = new_opts.get("max_concurrent", 2)
+            for i in range(self.tab_widget.count()):
+                tab_view = self.tab_widget.widget(i)
+                if hasattr(tab_view, "queue_engine"):
+                    tab_view.queue_engine.set_max_concurrent(max_c)
+            from PyQt6.QtCore import QSettings
+            QSettings("NovaCommander", "WinSCP-Linux").setValue("transfers/max_concurrent", max_c)
+            self.status_bar.showMessage(f"Transfer options updated (Simultaneous: {max_c} files).", 3000)
         dlg.options_saved.connect(_on_save)
         dlg.exec()
 

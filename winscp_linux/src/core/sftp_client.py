@@ -336,6 +336,12 @@ class SFTPClient:
             "host": host,
             "port": port,
             "username": username,
+            "password": password,
+            "private_key_path": private_key_path,
+            "passphrase": passphrase,
+            "timeout": timeout,
+            "keepalive_interval": keepalive_interval,
+            "compression": compression,
             "protocol": proto,
         }
 
@@ -438,6 +444,82 @@ class SFTPClient:
 
         if need_reconnect:
             self._reconnect_ftp()
+
+    def clone_client(self) -> Optional["SFTPClient"]:
+        """Creates an independent connected client instance sharing session credentials."""
+        with self._lock:
+            if not self._session_info:
+                return None
+            info = dict(self._session_info)
+        try:
+            client = SFTPClient()
+            client.connect(**info)
+            client._is_clone = True
+            return client
+        except Exception:
+            return None
+
+    def get_worker_client(self) -> "SFTPClient":
+        """
+        Returns a dedicated client or SFTP channel for parallel/concurrent worker transfers.
+        Falls back to self if cloning is not possible.
+        """
+        if not self.is_connected and self._protocol not in ("FTP", "FTPS"):
+            return self
+
+        if self._protocol in ("FTP", "FTPS"):
+            clone = self.clone_client()
+            if clone:
+                clone._is_worker = True
+                return clone
+            return self
+
+        elif self._protocol == "SFTP" and self._ssh:
+            transport = self._ssh.get_transport()
+            if transport and transport.is_active():
+                try:
+                    sftp_chan = self._ssh.open_sftp()
+                    worker = SFTPClient()
+                    worker._protocol = "SFTP"
+                    worker._ssh = self._ssh
+                    worker._sftp = sftp_chan
+                    worker._session_info = dict(self._session_info)
+                    worker._is_worker = True
+                    return worker
+                except Exception:
+                    pass
+            clone = self.clone_client()
+            if clone:
+                clone._is_worker = True
+                return clone
+
+        return self
+
+    def close_worker(self):
+        """Closes a worker client or secondary SFTP channel without closing the primary session."""
+        if not getattr(self, "_is_worker", False):
+            return
+        if getattr(self, "_sftp", None):
+            try:
+                self._sftp.close()
+            except Exception:
+                pass
+            self._sftp = None
+        if getattr(self, "_is_clone", False) and getattr(self, "_ssh", None):
+            try:
+                self._ssh.close()
+            except Exception:
+                pass
+            self._ssh = None
+        if getattr(self, "_ftp", None):
+            try:
+                self._ftp.quit()
+            except Exception:
+                try:
+                    self._ftp.close()
+                except Exception:
+                    pass
+            self._ftp = None
 
     def ensure_remote_dir(self, remote_dir: str) -> None:
         """
