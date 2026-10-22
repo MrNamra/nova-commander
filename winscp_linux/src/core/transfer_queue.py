@@ -471,7 +471,8 @@ class TransferQueueEngine(QThread):
 
             now = time.time()
             dt = now - job._last_calc_time
-            if dt >= 0.2:  # Throttle calculations to 5 updates per sec
+            is_done = (total > 0 and transferred >= total)
+            if dt >= 0.15 or is_done:
                 delta_bytes = transferred - job._last_calc_bytes
                 if dt > 0:
                     job.speed_bps = max(0.0, delta_bytes / dt)
@@ -481,18 +482,18 @@ class TransferQueueEngine(QThread):
                 job._last_calc_time = now
                 job._last_calc_bytes = transferred
 
-            job.transferred_bytes = transferred
-            if total > 0:
-                job.total_bytes = total
+                job.transferred_bytes = transferred
+                if total > 0:
+                    job.total_bytes = total
 
-            self.job_progress.emit(
-                job.job_id,
-                job.transferred_bytes,
-                job.total_bytes,
-                job.speed_bps,
-                job.eta_seconds,
-            )
-            self._emit_queue_overall_progress()
+                self.job_progress.emit(
+                    job.job_id,
+                    job.transferred_bytes,
+                    job.total_bytes,
+                    job.speed_bps,
+                    job.eta_seconds,
+                )
+                self._emit_queue_overall_progress()
 
         if job.direction == "upload":
             if job.is_dir or os.path.isdir(job.source):
@@ -515,6 +516,15 @@ class TransferQueueEngine(QThread):
         job.total_bytes = total_size
         accumulated_bytes = 0
 
+        # Ensure destination root directory exists
+        if hasattr(self.sftp_client, "ensure_remote_dir"):
+            self.sftp_client.ensure_remote_dir(job.dest)
+        else:
+            try:
+                self.sftp_client.mkdir(job.dest)
+            except Exception:
+                pass
+
         for root, dirs, files in os.walk(str(local_path)):
             if job._cancel_event.is_set():
                 raise _TransferCancelledException()
@@ -522,11 +532,18 @@ class TransferQueueEngine(QThread):
             rel_path = os.path.relpath(root, str(local_path))
             curr_remote_dir = job.dest if rel_path == "." else f"{job.dest.rstrip('/')}/{rel_path.replace(os.sep, '/')}"
 
+            if hasattr(self.sftp_client, "ensure_remote_dir"):
+                self.sftp_client.ensure_remote_dir(curr_remote_dir)
+
             for d in dirs:
-                try:
-                    self.sftp_client.mkdir(f"{curr_remote_dir.rstrip('/')}/{d}")
-                except Exception:
-                    pass
+                target_sub = f"{curr_remote_dir.rstrip('/')}/{d}"
+                if hasattr(self.sftp_client, "ensure_remote_dir"):
+                    self.sftp_client.ensure_remote_dir(target_sub)
+                else:
+                    try:
+                        self.sftp_client.mkdir(target_sub)
+                    except Exception:
+                        pass
 
             for f in files:
                 if job._cancel_event.is_set():
@@ -534,12 +551,20 @@ class TransferQueueEngine(QThread):
 
                 src_file = os.path.join(root, f)
                 dst_file = f"{curr_remote_dir.rstrip('/')}/{f}"
-                f_size = os.path.getsize(src_file)
+                try:
+                    f_size = os.path.getsize(src_file)
+                except Exception:
+                    continue
 
                 def _file_cb(cur: int, tot: int):
                     callback(accumulated_bytes + cur, total_size)
 
-                self.sftp_client.upload_file(src_file, dst_file, callback=_file_cb)
+                try:
+                    self.sftp_client.upload_file(src_file, dst_file, callback=_file_cb)
+                except Exception:
+                    time.sleep(0.05)
+                    self.sftp_client.upload_file(src_file, dst_file, callback=_file_cb)
+
                 accumulated_bytes += f_size
                 callback(accumulated_bytes, total_size)
 
@@ -553,15 +578,15 @@ class TransferQueueEngine(QThread):
         def _recurse_dl(rem_dir: str, loc_dir: str):
             nonlocal accumulated_bytes
             os.makedirs(loc_dir, exist_ok=True)
-            for item in self.sftp_client._sftp.listdir_attr(rem_dir):
+            for item in self.sftp_client.listdir(rem_dir):
                 if job._cancel_event.is_set():
                     raise _TransferCancelledException()
-                if item.filename in (".", ".."):
+                if item.name in (".", ".."):
                     continue
-                sub_rem = f"{rem_dir.rstrip('/')}/{item.filename}"
-                sub_loc = os.path.join(loc_dir, item.filename)
+                sub_rem = f"{rem_dir.rstrip('/')}/{item.name}"
+                sub_loc = os.path.join(loc_dir, item.name)
 
-                if stat.S_ISDIR(item.st_mode):
+                if item.is_dir:
                     _recurse_dl(sub_rem, sub_loc)
                 else:
                     def _file_cb(cur: int, tot: int):
@@ -604,23 +629,22 @@ class TransferQueueEngine(QThread):
             return 0
 
     def _estimate_remote_size(self, path: str, is_dir: bool) -> int:
-        if not self.sftp_client.is_connected or not self.sftp_client._sftp:
+        if not self.sftp_client.is_connected:
             return 0
         try:
             if not is_dir:
-                return self.sftp_client._sftp.stat(path).st_size
+                return self.sftp_client.stat(path).st_size
 
             total = 0
             def _walk(p: str):
                 nonlocal total
-                for item in self.sftp_client._sftp.listdir_attr(p):
-                    if item.filename in (".", ".."):
+                for item in self.sftp_client.listdir(p):
+                    if item.name in (".", ".."):
                         continue
-                    full_p = f"{p.rstrip('/')}/{item.filename}"
-                    if stat.S_ISDIR(item.st_mode):
-                        _walk(full_p)
+                    if item.is_dir:
+                        _walk(item.path)
                     else:
-                        total += item.st_size
+                        total += item.size
 
             _walk(path)
             return total

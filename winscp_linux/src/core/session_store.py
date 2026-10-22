@@ -320,11 +320,13 @@ class SessionStore:
                 section, "PublicKeyFile", fallback=parser.get(section, "PrivateKeyFile", fallback="")
             )
 
-            # Protocol in WinSCP: FSProtocol 0=SFTP, 1=SCP, 2=FTP, etc.
+            # Protocol in WinSCP: FSProtocol 0=SFTP, 1=SCP, 5=FTP, etc.
             fsprotocol = parser.get(section, "FSProtocol", fallback="")
             protocol_str = parser.get(section, "Protocol", fallback="")
             if fsprotocol == "1" or protocol_str.upper() == "SCP":
                 protocol = "SCP"
+            elif fsprotocol in ("2", "5") or protocol_str.upper() in ("FTP", "FTPS"):
+                protocol = protocol_str.upper() if protocol_str.upper() in ("FTP", "FTPS") else "FTP"
             else:
                 protocol = "SFTP"
 
@@ -421,8 +423,13 @@ class SessionStore:
                 lines.append(f"PublicKeyFile={s.private_key}")
             if s.passphrase:
                 lines.append(f"Passphrase={s.passphrase}")
-            # WinSCP FSProtocol: 0 = SFTP, 1 = SCP
-            fsprotocol = 1 if s.protocol.upper() == "SCP" else 0
+            # WinSCP FSProtocol: 0 = SFTP, 1 = SCP, 5 = FTP
+            if s.protocol.upper() == "SCP":
+                fsprotocol = 1
+            elif s.protocol.upper() in ("FTP", "FTPS"):
+                fsprotocol = 5
+            else:
+                fsprotocol = 0
             lines.append(f"FSProtocol={fsprotocol}")
             lines.append(f"Protocol={s.protocol}")
             if s.remote_dir:

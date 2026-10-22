@@ -90,6 +90,8 @@ from .export_dialog import ExportDialog
 from .find_files_dialog import FindFilesDialog
 from .function_bar import FunctionBarWidget
 from .generate_url_dialog import GenerateUrlDialog
+from .git_deploy_dialog import CloneRepoDialog, GitDeployDialog
+from ..core.git_manager import GitManager
 from .open_with_dialog import EditorPreferencesDialog, OpenWithDialog, SimpleOpenPromptDialog
 from .properties_dialog import PropertiesDialog
 from .session_dialog import SessionDialog
@@ -824,7 +826,8 @@ class SessionCommanderView(QWidget):
         self.current_session = session
         self.session_id = f"{session.username}_{session.host}_{session.port}".replace("/", "_")
 
-        self.status_message.emit(f"Connecting to {session.username}@{session.host}:{session.port}...")
+        proto = (getattr(session, "protocol", "SFTP") or "SFTP").upper()
+        self.status_message.emit(f"Connecting to {session.username}@{session.host}:{session.port} via {proto}...")
         self.progress_changed.emit(-1)
 
         worker = SFTPConnectWorker(
@@ -836,18 +839,20 @@ class SessionCommanderView(QWidget):
             private_key=session.private_key,
             passphrase=getattr(session, "passphrase", ""),
             initial_remote_dir=session.remote_dir or "/",
+            protocol=proto,
         )
         self._active_worker = worker
 
         def _on_connected(remote_home: str):
             self.progress_changed.emit(0)
-            self.status_message.emit(f"Connected to {session.host}")
+            self.status_message.emit(f"Connected to {session.host} via {proto}")
 
             self.txt_remote_path.setText(remote_home)
             self._load_remote_directory(remote_home)
 
             title = session.name if session.name else session.host
-            info = f"{session.username}@{session.host}:{session.port}"
+            proto_suffix = f" ({proto})" if proto != "SFTP" else ""
+            info = f"{session.username}@{session.host}:{session.port}{proto_suffix}"
             self.session_connected.emit(title, info)
 
         def _on_failed(err: str):
@@ -865,7 +870,7 @@ class SessionCommanderView(QWidget):
                     self.connect_to_session(session)
                     return
             self.status_message.emit(f"Connection failed: {err}")
-            QMessageBox.critical(self, "Connection Error", f"Could not connect to {session.host}:\n{err}")
+            QMessageBox.critical(self, "Connection Error", f"Could not connect to {session.host} via {proto}:\n{err}")
 
         worker.connected.connect(_on_connected)
         worker.failed.connect(_on_failed)
@@ -896,6 +901,16 @@ class SessionCommanderView(QWidget):
 
     def open_terminal_window(self):
         """Opens a dedicated SSH interactive terminal in a new standalone window (Ctrl+P)."""
+        if self.current_session and getattr(self.current_session, "protocol", "SFTP").upper() in ("FTP", "FTPS"):
+            QMessageBox.information(
+                self,
+                "Terminal Not Available on FTP",
+                "The active session is connected via standard FTP.\n\n"
+                "Standard FTP servers do not provide an interactive SSH shell or command terminal.\n"
+                "To use the terminal, connect using the SFTP or SCP protocol.",
+            )
+            return
+
         if not self.sftp_client.is_connected:
             reply = QMessageBox.question(
                 self,
@@ -1806,6 +1821,23 @@ class SessionCommanderView(QWidget):
         dlg.sync_completed.connect(self.refresh_both)
         dlg.exec()
 
+    def open_git_deploy_dialog(self):
+        """Opens Git FTP Deployment & Smart Sync dialog."""
+        dlg = GitDeployDialog(
+            sftp_client=self.sftp_client,
+            local_dir=self.txt_local_path.text(),
+            remote_dir=self.txt_remote_path.text(),
+            parent=self,
+        )
+        dlg.deployment_completed.connect(self.refresh_both)
+        dlg.exec()
+
+    def open_clone_repo_dialog(self):
+        """Opens Clone Git Repository dialog."""
+        dlg = CloneRepoDialog(initial_dest_dir=self.txt_local_path.text(), parent=self)
+        dlg.repo_cloned.connect(lambda new_dir: self._load_local_directory(new_dir))
+        dlg.exec()
+
     def open_bookmarks_dialog(self):
         dlg = BookmarksDialog(self.txt_remote_path.text(), self.txt_local_path.text(), self)
         def _on_jump(remote_p, local_p):
@@ -2119,6 +2151,9 @@ class SessionCommanderView(QWidget):
         act_mkdir = menu.addAction("📁 New Directory (F7)")
         act_mkdir.triggered.connect(self.create_directory)
         menu.addSeparator()
+        act_git = menu.addAction("🚀 Git FTP Deploy from Here... (Ctrl+G)")
+        act_git.triggered.connect(self.open_git_deploy_dialog)
+        menu.addSeparator()
         act_ref = menu.addAction("🔄 Refresh")
         act_ref.triggered.connect(lambda: self._load_local_directory(self.txt_local_path.text()))
         menu.exec(self.table_local.mapToGlobal(pos))
@@ -2348,6 +2383,15 @@ class MainWindow(QMainWindow):
         act_sync.triggered.connect(self.open_synchronize_dialog)
         self.addAction(act_sync)
 
+        act_git_deploy = m_cmd.addAction("Git FTP Deploy... (Ctrl+G)")
+        act_git_deploy.setShortcut(QKeySequence("Ctrl+G"))
+        act_git_deploy.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        act_git_deploy.triggered.connect(self.open_git_deploy_dialog)
+        self.addAction(act_git_deploy)
+
+        act_clone_git = m_cmd.addAction("Clone Git Repository...")
+        act_clone_git.triggered.connect(self.open_clone_repo_dialog)
+
         act_compare = m_cmd.addAction("Compare Directories (Shift+F2)")
         act_compare.setShortcut(QKeySequence("Shift+F2"))
         act_compare.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
@@ -2475,6 +2519,10 @@ class MainWindow(QMainWindow):
         self.tb_sync = toolbar.addAction("🔄 Sync")
         self.tb_sync.setToolTip("Synchronize Directories (Ctrl+S)")
         self.tb_sync.triggered.connect(self.open_synchronize_dialog)
+
+        self.tb_git_deploy = toolbar.addAction("🚀 Git Deploy")
+        self.tb_git_deploy.setToolTip("Git FTP Deploy & Smart Sync (Ctrl+G)")
+        self.tb_git_deploy.triggered.connect(self.open_git_deploy_dialog)
 
         self.tb_compare = toolbar.addAction("⚖ Compare")
         self.tb_compare.setToolTip("Compare Directories (Shift+F2)")
@@ -2709,8 +2757,10 @@ class MainWindow(QMainWindow):
 
         if view.sftp_client.is_connected and view.current_session:
             s = view.current_session
+            proto = (getattr(s, "protocol", "SFTP") or "SFTP").upper()
+            proto_tag = f" ({proto})" if proto != "SFTP" else ""
             tab_info = f" [Tab {index+1}/{self.tab_widget.count()}]"
-            self.lbl_session.setText(f"🟢 {s.username}@{s.host}:{s.port}{tab_info}")
+            self.lbl_session.setText(f"🟢 {s.username}@{s.host}:{s.port}{proto_tag}{tab_info}")
             self.lbl_session.setStyleSheet("padding: 2px 8px; font-weight: bold; color: #4ec9b0;")
             self.tb_disconnect.setEnabled(True)
         else:
@@ -2892,6 +2942,14 @@ class MainWindow(QMainWindow):
     def open_synchronize_dialog(self):
         if view := self.active_session_view():
             view.open_synchronize_dialog()
+
+    def open_git_deploy_dialog(self):
+        if view := self.active_session_view():
+            view.open_git_deploy_dialog()
+
+    def open_clone_repo_dialog(self):
+        if view := self.active_session_view():
+            view.open_clone_repo_dialog()
 
     def open_bookmarks_dialog(self):
         if view := self.active_session_view():

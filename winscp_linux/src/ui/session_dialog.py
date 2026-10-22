@@ -327,7 +327,7 @@ class SessionDialog(QDialog):
         # Protocol & Port
         proto_layout = QHBoxLayout()
         self.cmb_protocol = QComboBox()
-        self.cmb_protocol.addItems(["SFTP", "SCP", "FTP", "WebDAV", "Amazon S3"])
+        self.cmb_protocol.addItems(["SFTP", "SCP", "FTP", "FTPS", "WebDAV", "Amazon S3"])
         self.cmb_protocol.currentIndexChanged.connect(self._on_protocol_changed)
         self.spin_port = QSpinBox()
         self.spin_port.setRange(1, 65535)
@@ -470,13 +470,19 @@ class SessionDialog(QDialog):
         self.btn_cancel.clicked.connect(self.reject)
 
     def _on_protocol_changed(self, index: int):
-        proto = self.cmb_protocol.currentText()
-        if proto == "FTP":
-            if self.spin_port.value() == 22:
+        proto = self.cmb_protocol.currentText().upper()
+        if proto in ("FTP", "FTPS"):
+            if self.spin_port.value() in (22, 0):
                 self.spin_port.setValue(21)
+            self.txt_key_path.setEnabled(False)
+            self.btn_browse_key.setEnabled(False)
+            self.txt_passphrase.setEnabled(False)
         elif proto in ("SFTP", "SCP"):
-            if self.spin_port.value() == 21:
+            if self.spin_port.value() in (21, 0):
                 self.spin_port.setValue(22)
+            self.txt_key_path.setEnabled(True)
+            self.btn_browse_key.setEnabled(True)
+            self.txt_passphrase.setEnabled(True)
 
     def _filter_tree(self, text: str):
         query = text.strip().lower()
@@ -614,6 +620,7 @@ class SessionDialog(QDialog):
         self.txt_key_path.setText(s.private_key)
         self.txt_passphrase.setText(getattr(s, "passphrase", ""))
         self.cmb_protocol.setCurrentText(s.protocol)
+        self._on_protocol_changed(0)
         self.txt_remote_dir.setText(s.remote_dir or "/")
         self.txt_local_dir.setText(s.local_dir or str(Path.home()))
         self.txt_comment.setText(s.comment or "")
@@ -630,6 +637,7 @@ class SessionDialog(QDialog):
         self.txt_passphrase.clear()
         self.spin_port.setValue(22)
         self.cmb_protocol.setCurrentText("SFTP")
+        self._on_protocol_changed(0)
         self.txt_remote_dir.setText("/")
         self.txt_local_dir.setText(str(Path.home()))
         self.txt_comment.clear()

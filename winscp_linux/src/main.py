@@ -10,27 +10,29 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import traceback
 from pathlib import Path
 
-# Ensure Qt 6.5+ xcb-cursor0 dependency is loaded seamlessly on Linux
-if sys.platform.startswith("linux") and os.environ.get("_WINSCP_XCB_LOADED") != "1":
-    candidates = [
-        Path(__file__).resolve().parent.parent / "lib",
-        Path.home() / ".local" / "lib",
-    ]
-    for c in candidates:
-        if (c / "libxcb-cursor.so.0").exists():
-            lib_path = str(c)
-            current_ld = os.environ.get("LD_LIBRARY_PATH", "")
-            if lib_path not in current_ld.split(":"):
-                os.environ["_WINSCP_XCB_LOADED"] = "1"
-                os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{current_ld}" if current_ld else lib_path
-                try:
-                    argv = getattr(sys, "orig_argv", [sys.executable] + sys.argv)
-                    os.execv(sys.executable, argv)
-                except Exception:
-                    pass
-            break
+def _ensure_xcb_cursor():
+    # Ensure Qt 6.5+ xcb-cursor0 dependency is loaded seamlessly on Linux
+    if sys.platform.startswith("linux") and os.environ.get("_WINSCP_XCB_LOADED") != "1":
+        candidates = [
+            Path(__file__).resolve().parent.parent / "lib",
+            Path.home() / ".local" / "lib",
+        ]
+        for c in candidates:
+            if (c / "libxcb-cursor.so.0").exists():
+                lib_path = str(c)
+                current_ld = os.environ.get("LD_LIBRARY_PATH", "")
+                if lib_path not in current_ld.split(":"):
+                    os.environ["_WINSCP_XCB_LOADED"] = "1"
+                    os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{current_ld}" if current_ld else lib_path
+                    try:
+                        argv = getattr(sys, "orig_argv", [sys.executable] + sys.argv)
+                        os.execv(sys.executable, argv)
+                    except Exception:
+                        pass
+                break
 
 # Ensure root and src directory are in sys.path
 _src_dir = Path(__file__).resolve().parent
@@ -332,6 +334,20 @@ def main():
     # Allow SIGINT (Ctrl+C) to terminate app
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
+    # Ignore SIGPIPE to prevent unexpected process exit on broken sockets or subprocesses
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+    # Global excepthook preventing unhandled Qt slot exceptions from aborting the process
+    def _safe_excepthook(exc_type, exc_val, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_val, exc_tb)
+            return
+        sys.stderr.write("Unhandled exception:\n")
+        traceback.print_exception(exc_type, exc_val, exc_tb, file=sys.stderr)
+
+    sys.excepthook = _safe_excepthook
+
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
@@ -365,4 +381,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _ensure_xcb_cursor()
     main()
